@@ -1,8 +1,23 @@
-# Gnimu-CAN
+<p>
+  <img src="https://raw.githubusercontent.com/c20d-us/Gnimu-branding/main/svg/gnimu-icon-default-rounded.svg" alt="Gnimu icon" height="72">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/c20d-us/Gnimu-branding/main/wordmark/gnimu-wordmark-transparent-white.svg">
+    <img src="https://raw.githubusercontent.com/c20d-us/Gnimu-branding/main/wordmark/gnimu-wordmark-transparent-navy.svg" alt="gnimu" height="72">
+  </picture>
+</p>
 
-Firmware for a Seeed Studio XIAO ESP32C6 that reads vehicle data from CAN and publishes it over Bluetooth LE for a receiver to subscribe to.
+# Gnimu-CAN: CAN bus motorsports telemetry
 
-This is the OBD-II version: it polls standard Mode 01 PIDs (RPM, speed, temperatures, and so on) using 11-bit ISO 15765-4 requests, and sends each response as a BLE notification. The frame format is in [docs/ble-protocol.md](docs/ble-protocol.md).
+[![License: GPL v3+](https://img.shields.io/badge/License-GPLv3%2B-blue.svg)](LICENSE)
+[![Platform: ESP32-C6](https://img.shields.io/badge/platform-ESP32--C6-000000.svg)](#hardware)
+[![Language: C++ (Arduino)](https://img.shields.io/badge/language-C%2B%2B%20(Arduino)-00599C.svg)](https://www.arduino.cc/)
+
+Gnimu-CAN is firmware for a Seeed Studio XIAO ESP32C6 that reads vehicle data from a car's CAN bus and streams it over BLE (Bluetooth Low Energy) at a fixed rate, for telemetry apps to record alongside GNSS and IMU data. It's a companion to [Gnimu](https://github.com/c20d-us/Gnimu), and its first target app is [AutoX Data Logger](https://autoxdrivermod.com), which reads it as a custom BLE sensor.
+
+The first version is vehicle-agnostic: it polls standard OBD-II PIDs (RPM and throttle position to start) over the OBD-II port and works on most cars from 2008 on. Vehicle-specific variants come later. The BLE packet format is in [docs/ble-protocol.md](docs/ble-protocol.md).
+
+> [!NOTE]
+> **Work in progress.** The design is written up and a breadboard prototype is being built, but the firmware itself isn't written yet. Anything here may change.
 
 ## Hardware
 
