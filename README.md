@@ -14,7 +14,7 @@
 
 Gnimu-CAN is firmware for a Seeed Studio XIAO ESP32C6 that reads vehicle data from a car's CAN bus and streams it over BLE (Bluetooth Low Energy) at a fixed rate, for telemetry apps to record alongside GNSS and IMU data. It's a companion to [Gnimu](https://github.com/c20d-us/Gnimu), and its first target app is [AutoX Data Logger](https://autoxdrivermod.com), which reads it as a custom BLE sensor.
 
-The first version is vehicle-agnostic: it polls standard OBD-II PIDs (RPM and throttle position to start) over the OBD-II port and works on most cars from 2008 on. Vehicle-specific variants come later. The BLE packet format is in [docs/ble-protocol.md](docs/ble-protocol.md).
+The first version is vehicle-agnostic: it polls standard OBD-II PIDs (RPM and throttle position to start) over the OBD-II port and works on most cars from 2008 on. Vehicle-specific variants come later. It streams the shared [Gnimu frame](https://github.com/c20d-us/Gnimu-protocol); what it fills and how to set up AutoXDL are in [docs/ble-protocol.md](docs/ble-protocol.md).
 
 > [!NOTE]
 > **Work in progress.** The design is written up and a breadboard prototype is being built, but the firmware itself isn't written yet. Anything here may change.
@@ -63,7 +63,7 @@ code/GnimuCAN/       The firmware sketch
   src/               Everything else
 docs/
   architecture.md    firmware design
-  ble-protocol.md    BLE packet format for receivers
+  ble-protocol.md    BLE identity, frame fields and AutoXDL setup
 scripts/             build and flash helpers
 tools/               standalone diagnostic sketches, built with scripts/tool.sh
 ```

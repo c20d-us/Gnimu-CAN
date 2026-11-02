@@ -48,16 +48,7 @@ What follows from the hardware:
 
 The LiPo carrier has the same CAN section, with `VBAT_SENSE` (÷2) on A0 instead. It would be a second hardware profile, as in Gnimu, with a battery power policy instead of the vehicle one. It's out of scope for v1.
 
-There's also a **bench** hardware profile for the breadboard prototype. It's wired like the 12V carrier but powered from a 9V battery where the car's 12V would be, so the voltage thresholds don't fit. 9V is below the car's low-voltage cutoff, and a vehicle build would go straight to sleep. The bench profile changes only the power settings:
-
-| Setting | 12V carrier | Bench |
-|---|---|---|
-| Engine-running threshold | 13.2V | 13.2V, so the 9V battery reads as parked |
-| Low-voltage cutoff | 11.8V | 6.5V, about where a 9V battery is spent |
-| Sleep when parked | After about 5 minutes | Off |
-| `S` console command | Not available | Overrides the measured supply voltage |
-
-`S 14.2` makes the firmware act as if it measured 14.2V, which is how the bench gets to "engine running" for the gateway probe, and how it tests the cutoff (`S 6`). `S` on its own goes back to the real reading. While an override is active, the status line and `D` report mark the voltage as simulated. The command exists only in bench builds, so a vehicle build can never be talked into probing a parked car.
+The breadboard prototype runs the 12V carrier build unchanged. An adjustable bench supply stands in for the car's voltage, so the power logic sees real readings through the real divider (see [Bench rig](#bench-rig)).
 
 ---
 
@@ -67,7 +58,7 @@ The same four layers as Gnimu, under `code/GnimuCAN/src/`, with the sketch and `
 
 | Layer | What's in it |
 |---|---|
-| `core/` | Plain C++, host-tested: the scheduler, the run-state machine, the power policy, the OBD request/response codec, the poll planner, the channel cache, the BLE packet encoder, the report formatters. |
+| `core/` | Plain C++, host-tested: the scheduler, the run-state machine, the power policy, the OBD request/response codec, the poll planner, the channel cache, filling the Gnimu frame from it (the encoder itself is the protocol repo's C++ reference), the report formatters. |
 | `platform/` | The board: clock, watchdog, reset reason, hardware ID, the TWAI controller and silent pin, the supply ADC, the LED, deep sleep. ESP32-C6 only for now, but kept behind headers so `core/` stays testable. |
 | `peripherals/` | The CAN bus driver on top of TWAI, and the BLE transport (NimBLE through the Arduino BLE library). |
 | `app/` | The job table, the state handling, the console, the diagnostics. |
@@ -80,7 +71,7 @@ These Gnimu pieces carry over nearly unchanged and will be copied, not shared: `
 
 ```
 CAN bus ──► can job ──► OBD poller ──► channel cache ──► emit job (fixed) ──► BLE notify
-            (drain RX)   (requests,      (latest value,     (snapshot packet)
+            (drain RX)   (requests,      (latest value,     (Gnimu frame)  
                           replies)        time, count)
 supply ADC ─────────────────────────────►┘
 ```
@@ -89,17 +80,25 @@ Collecting and emitting are independent:
 
 - The **poller** runs whenever the vehicle is awake, whether or not an app is connected, so the cache is already warm when one subscribes.
 - The **emitter** runs only while a client is subscribed. At a fixed rate it reads the cache and sends one packet. It never waits on the bus.
-- AutoXDL reads only the channel values. The packet's trailing status block carries which slots are valid and which were updated since the last packet, for Gnimu's own tools. The cache also tracks each channel's age and update rate for the console diagnostics.
+- The frame's valid mask says which fields hold a value. AutoXDL ignores it; Gnimu tools use it. The cache also tracks each channel's age and update rate for the console diagnostics.
 
 ### Emit rate
 
-**20 Hz is a starting point, not a design limit.** The rate is one setting, `kEmitRateHz` in `Config.h`, and the `emit` job's period follows from it. The plan is to raise it as far as testing shows is worthwhile, or lower it if something can't keep up.
+**20 Hz is a starting point, not a design limit.** The rate is one setting, `kEmitRateHz` in `Config.h`, and the `emit` job's period follows from it. The plan is to raise it as far as testing shows is worthwhile, or lower it if something can't keep up. About 30 Hz is the likely upper end, a little above the GNSS rate for the reasons below.
 
 What sets the useful ceiling:
 
-- **How fast the car answers.** Emitting faster than a channel updates only repeats values. The `fresh` bits and the per-channel rates in the diagnostics show where that point is. With two channels sharing a typical car's 20–60 replies per second, it's roughly 10–30 Hz per channel. Getting more real data means raising the poll rate: fewer channels, multi-PID requests, or a vehicle profile that reads broadcast frames instead of polling.
+- **How fast the car answers.** Emitting faster than a channel updates only repeats values. The per-channel rates in the diagnostics show where that point is. With two channels sharing a typical car's 20–60 replies per second, it's roughly 10–30 Hz per channel. Getting more real data means raising the poll rate: fewer channels, multi-PID requests, or a vehicle profile that reads broadcast frames instead of polling.
 - **The BLE connection.** The phone sets the connection interval. iOS typically allows down to 15 ms, which is about 66 connection events per second. Going above roughly 50 Hz needs testing with the real phone and app.
-- **What AutoXDL records.** The working assumption is that the app takes data at whatever rate the device sends it and blends it into its telemetry stream. With a Veepeak OBD-II dongle, which updates more slowly than the GNSS source, the app's VBO files show the OBD values repeating between updates. That suggests the recorded rows follow the GNSS source's rate (20–25 Hz with Gnimu), with each row carrying the latest OBD value. If so, emitting faster than the GNSS rate would make the values fresher in each row but wouldn't add rows. A VBO recorded with Gnimu-CAN will confirm it ([open question 1](#open-questions)).
+- **What AutoXDL records.** Confirmed: the app accepts custom sensor data at whatever rate the device sends it, then aligns it to the GNSS source's cadence (20–25 Hz with Gnimu). Each recorded row carries the latest value received. Emitting faster than the GNSS rate doesn't add rows.
+
+How old the value in a row is has three parts:
+
+- **Poll age:** how long ago the car answered. With a channel updating at *P* Hz, this averages about 1/(2*P*): 17–50 ms at 10–30 Hz. **This is the big one.**
+- **Emit age:** how long ago the latest packet left the device. At emit rate *E*, it averages 1/(2*E*): 25 ms at 20 Hz, 20 ms at 25 Hz, 10 ms at 50 Hz.
+- **BLE delivery:** packets arrive at the phone in the connection's events (every 15–30 ms or so), which adds a similar amount whatever *E* is.
+
+So raising the emit rate shaves only a few milliseconds off the average age. The real reason to run **a little above** the GNSS rate is different. The device's clock and the GNSS receiver's clock aren't synchronised. At exactly the same nominal rate, the two drift past each other, and now and then a GNSS interval gets no new packet, so that row repeats the previous value. A margin of a few Hz makes that rare. The real gains in freshness come from polling the car faster.
 
 The emitter keeps its rate fixed whatever happens upstream. That's the consistency goal: a higher rate is only worth it if it holds steady.
 
@@ -136,18 +135,18 @@ A gatewayed car with the ignition on but the engine off won't be found, because 
 
 ### Channels
 
-The first build sends **RPM and throttle position**, replacing what an ELM327-style OBD-II dongle (such as the Veepeak OBDCheck BLE+) gives AutoXDL today. More channels come later. The packet has eight slots; AutoXDL reads four today, and its developer has stated that he could raise that on request.
+The first build sends **RPM and throttle position**, replacing what an ELM327-style OBD-II dongle (such as the Veepeak OBDCheck BLE+) gives AutoXDL today. More channels come later. Each one already has its field in the [Gnimu frame](https://github.com/c20d-us/Gnimu-protocol/blob/main/docs/frame.md), so adding one never changes the frame.
 
-| Channel | PID | Decode | Slot | In v1 |
+| Channel | PID | Decode | Frame field | In v1 |
 |---|---|---|---|---|
-| RPM | `0x0C` | (256A + B) / 4 | 1 | Yes |
-| Throttle position | `0x11` | A × 100 / 255 % | 2 | Yes |
-| Coolant temperature | `0x05` | A − 40 °C | — | Later |
-| Engine load | `0x04` | A × 100 / 255 % | — | Later |
-| Intake air temperature | `0x0F` | A − 40 °C | — | Later |
-| Supply voltage | ADC, divider × 11 | — | — | Later in the packet. Measured from v1 for the power policy. |
+| RPM | `0x0C` | (256A + B) / 4 | Engine speed (vehicle bit 0) | Yes |
+| Throttle position | `0x11` | A × 100 / 255 % | Throttle position (vehicle bit 1) | Yes |
+| Supply voltage | ADC, divider × 11 | — | Supply voltage (power bit 0) | Yes, from the ADC, not the bus |
+| Coolant temperature | `0x05` | A − 40 °C | Coolant temperature (vehicle bit 4) | Later |
+| Intake air temperature | `0x0F` | A − 40 °C | Intake air temperature (vehicle bit 5) | Later |
+| Ambient air temperature | `0x46` | A − 40 °C | Ambient air temperature (vehicle bit 6) | Later |
 
-`Config.h` has a channel table and a slot table. The poller only polls channels that are in a slot, so every request goes to data the app will actually receive. With two channels, each gets about half of the car's reply budget: roughly 10–30 Hz per channel on a typical car, which is the number the diagnostics will confirm.
+`Config.h` has one channel table: each entry names a PID, its decode, its frame field and its target rate. The poller only polls what's in the table. With two channels, each gets about half of the car's reply budget: roughly 10–30 Hz per channel on a typical car, which is the number the diagnostics will confirm.
 
 ### Vehicle profiles
 
@@ -172,9 +171,9 @@ The `obd2` profile also stays useful on those cars: Mode 01 PIDs answer on BMWs 
 
 ## BLE
 
-The device advertises as `Gnimu-CAN` followed by the 10-digit device ID, the same scheme as Gnimu, with the service UUID in the advertising data so AutoXDL's scan finds it. It exposes one service with one notify characteristic, and sends a 20-byte packet at the [emit rate](#emit-rate) (20 Hz to start) while a client is subscribed: eight little-endian `int16` channel slots, followed by a status block (sequence, valid and fresh bits, state) that AutoXDL ignores. The schema, and the scale to enter in AutoXDL for each channel, are in [ble-protocol.md](ble-protocol.md).
+The device advertises as `Gnimu-CAN` followed by the 10-digit device ID, the same scheme as Gnimu, with the service UUID in the advertising data so AutoXDL's scan finds it. It sends only the 140-byte [Gnimu frame](https://github.com/c20d-us/Gnimu-protocol/blob/main/docs/frame.md), the layout shared by the whole Gnimu family, at the [emit rate](#emit-rate) (20 Hz to start) while a client is subscribed, to one client at a time. It fills the header, the vehicle fields it polls and the supply voltage, and sends the GNSS and IMU blocks as zeros. The encoder is the protocol repo's C++ reference, copied into `src/`. The UUIDs, the fields it fills and the AutoXDL setup are in [ble-protocol.md](ble-protocol.md).
 
-The boot log and the `V` command print the slot table (name, type, offset, scale), so setting up the app means copying it from the console.
+The boot log and the `V` command print the AutoXDL setup table (name, type, offset, scale for each filled field), so setting up the app means copying it from the console.
 
 ---
 
@@ -200,7 +199,7 @@ The boot log and the `V` command print the slot table (name, type, offset, scale
 
 Unlike Gnimu, Running and WaitingForVehicle move back and forth without a restart. A car switching off and on again is normal operation, not a failure. Sleep, though, always comes back through a fresh boot, so the device still starts up only one way.
 
-While waiting, a subscribed client still gets packets at the emit rate, so the app's connection stays up. CAN channels read 0, and the supply voltage, if it's in a slot, stays live.
+While waiting, a subscribed client still gets packets at the emit rate, so the app's connection stays up. The vehicle fields read 0 with their valid bits clear, the header's state says waiting, and the supply voltage stays live.
 
 ---
 
@@ -235,10 +234,10 @@ Table order is priority, as in Gnimu: draining the bus comes first.
 
 ## Console and diagnostics
 
-Same port, baud and commands as Gnimu: `D` report, `C` clear counters, `V` version and config, `L` status line, a number for N status lines, `R` restart, plus `S` in bench builds (see [the bench profile](#hardware)). Boot log in the same style:
+Same port, baud and commands as Gnimu: `D` report, `C` clear counters, `V` version and config, `L` status line, a number for N status lines, `R` restart. Boot log in the same style:
 
 ```
-BUILD,version=0.1.0,revision=...,dirty=0,utc=...,target=esp32c6
+BUILD,version=0.1.0,revision=...,utc=...,target=esp32c6
 Device ID: 0301821570
 Config: hardware 12v, CAN auto 500/250 kbit/s, OBD 2 channels
 Config: BLE name "Gnimu-CAN 0301821570", 20 Hz
@@ -267,7 +266,7 @@ The status LED is the XIAO's single yellow LED, so it shows patterns only, like 
 
 ## Testing
 
-- **Host tests** for everything in `core/`: OBD request encoding and reply parsing (including the malformed and wrong-ECU cases), support-bitmap decoding, the poll planner's rate shares, the packet encoder's byte layout, the state machine and the power policy.
+- **Host tests** for everything in `core/`: OBD request encoding and reply parsing (including the malformed and wrong-ECU cases), support-bitmap decoding, the poll planner's rate shares, filling the frame from the cache, the state machine and the power policy.
 - **Build checks** with warnings as errors in the project's own code, as in Gnimu.
 - **On hardware**: the bit-rate check against a real car, poll throughput, sleep current, and timing under load from the diagnostics job table.
 
@@ -275,15 +274,14 @@ The status LED is the XIAO's single yellow LED, so it shows patterns only, like 
 
 Two breadboards, joined by a CAN_H/CAN_L/GND pair:
 
-- **Device:** a XIAO ESP32C6 and a CAN Pal wired as on the 12V carrier, with R1 on `CAN_SILENT` and the ÷11 divider on A0. A 9V battery on the 12V input powers it through the buck regulator, and the [bench profile](#hardware) adjusts the voltage thresholds to suit. Keep the Schottky diode (D2) between the regulator and the XIAO's 5V pin: the USB cable for the console will be plugged in at the same time.
+- **Device:** a XIAO ESP32C6 and a CAN Pal wired as on the 12V carrier, with R1 on `CAN_SILENT` and the ÷11 divider on A0. An adjustable bench supply (0–30V) on the 12V input powers it through the buck regulator and plays the car's voltage: about 12.4V parked, about 14.2V engine running, below 11.8V for the low-voltage cutoff, and anything in between to test the transitions. Set its current limit to about 150–200 mA. Keep below about 16V if the TVS diode (D1) is fitted, since it starts conducting around 17V. Keep the Schottky diode (D2) between the regulator and the XIAO's 5V pin: the USB cable for the console will be plugged in at the same time.
 - **Fake ECU:** a second XIAO ESP32C6 and CAN Pal running a small sketch (`tools/fake_ecu/`) that answers Mode 01 requests on `0x7E8` with changing RPM and throttle values. It has settings for a reply delay, so it can stand in for slow or fast ECUs, and for staying silent until asked, like a gatewayed port. It runs from a 5V plug-in supply on the XIAO's 5V pin through a Schottky diode (a 1N5819, like D2), so it's safe to have its USB cable plugged in too. It has no voltage divider or buck regulator.
 - **Termination:** both CAN Pals' termination switches **on** for the bench, so the bus has a 120Ω end on each side as a car does. Both must be **off** before either is used in a car.
 
-Without the fake ECU, the device alone still exercises boot, states, voltage sense, BLE and, with `S 14.2`, the gateway probe's failure path (no node to acknowledge it). With it, the whole OBD path can be tested: discovery, the gateway probe's success path, polling rates and the diagnostics.
+Without the fake ECU, the device alone still exercises boot, states, voltage sense, BLE and, with the supply above the engine-running threshold, the gateway probe's failure path (no node to acknowledge it). With it, the whole OBD path can be tested: discovery, the gateway probe's success path, polling rates and the diagnostics.
 
 ---
 
 ## Open questions
 
-1. **AutoXDL recording rate.** Working assumption: the app accepts any rate and blends the values into its stream, as it does with a Veepeak dongle. To confirm from a VBO file recorded with Gnimu-CAN: whether rows follow the GNSS rate, and whether emitting faster than it changes anything. This decides how high the [emit rate](#emit-rate) is worth going.
-2. **Sleep thresholds and wake interval.** Set once the parked current is measured.
+1. **Sleep thresholds and wake interval.** Set once the parked current is measured.
