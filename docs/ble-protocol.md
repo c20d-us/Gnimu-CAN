@@ -3,7 +3,7 @@
 Gnimu-CAN streams the **[Gnimu frame](https://github.com/c20d-us/Gnimu-protocol/blob/main/docs/frame.md)**, the one telemetry layout shared by every Gnimu-family device. It never sends anything else. This page covers only what's specific to Gnimu-CAN: its identity, which frame fields it fills, and how to set up AutoX Data Logger (AutoXDL). The layout itself, the conventions, and the encoding rules are in the [Gnimu protocol](https://github.com/c20d-us/Gnimu-protocol) repo.
 
 > [!NOTE]
-> **Not yet implemented.** Gnimu frame v1 is still in progress, and nothing on this page is implemented yet.
+> Gnimu frame v1 is still in progress, so details here may change before it's published. Everything on this page is implemented except the Control characteristic.
 
 ## Identity
 
@@ -35,13 +35,13 @@ Capabilities **12** (vehicle and power). Every field not listed here is sent as 
 | Frame field | Block, bit | Offset | Source | Valid when |
 |---|---|---|---|---|
 | Header | — | 0–7 | Device time, sequence, capabilities, state | Always |
-| Engine speed | vehicle, 0 | 75 | OBD-II PID `0x0C` | The car has answered since the vehicle was found |
-| Throttle position | vehicle, 1 | 77 | OBD-II PID `0x11` | The car has answered since the vehicle was found |
+| Engine speed | vehicle, 0 | 75 | OBD-II PID `0x0C` | Polling, and the car answered within the last second |
+| Throttle position | vehicle, 1 | 77 | OBD-II PID `0x11` | Polling, and the car answered within the last second |
 | Supply voltage | power, 0 | 134 | The supply ADC, through the carrier's ÷11 divider | Always, once the first reading is taken |
 
 More vehicle fields come as the firmware polls more PIDs. Each new one fills its existing frame field, so the frame and any app setup already made don't change.
 
-**State** in the header follows the device's [run states](architecture.md#run-states): 1 starting, 2 running, 3 waiting for the vehicle, 4 fault.
+**State** in the header follows the device's [run states](architecture.md#run-states): 1 starting, 2 running (Gnimu-CAN's Polling state), 3 waiting for the vehicle, 4 fault. The protocol names code 2 "running" for every Gnimu device.
 
 ## Rate
 
@@ -66,7 +66,22 @@ Then add channels. Up to four are allowed today; the AutoXDL developer has said 
 | Supply (V) | uint16 | 134 | 100 |
 | Device time (ms) | int32 | 0 | 1 |
 
-Device time is optional, but worth recording: it lets a log be re-timed afterwards from the device's own clock. The device's `V` console command prints this same table.
+Device time is optional, but worth recording: it lets a log be re-timed afterwards from the device's own clock.
+
+The console's `P` command prints the same setup, laid out like the app's form:
+
+```
+Gnimu CAN Protocol
+  Service         9074beb4-2f1a-4b5f-9818-fe2d2277ef05
+  Notify          0752d3c3-ceaf-462f-a944-bcc06c57284b
+  Packet length   140
+
+  Name                Type    Offset  Scale
+  Device time (ms)    int32        0      1
+  RPM                 int16       75      1
+  Throttle (%)        int16       77     10
+  Supply voltage (V)  uint16     134    100
+```
 
 ## Schema
 
@@ -87,16 +102,17 @@ The device info characteristic returns the build and current settings, in the [f
 | `can` | `"auto 500/250"` | CAN bit rates tried, in order |
 | `probe_kbps` | `500` | Gateway probe bit rate |
 | `emit_hz` | `20` | Frame rate |
-| `run_v` | `13.2` | Engine-running threshold, V |
-| `cutoff_v` | `11.8` | Low-voltage cutoff, V |
+| `run_v` | `13.20` | Engine-running threshold, V |
+| `cutoff_v` | `11.80` | Low-voltage cutoff, V |
+| `supply_cal` | `1.010` | Supply calibration factor |
 | `pids` | `"0C,11"` | Mode 01 PIDs polled |
 
 ```json
 {"v":1,"build":{"rev":"7f7efe5f4d6a","utc":"2026-10-30T17:27:43Z","target":"esp32c6"},
- "cfg":{"hw":"12v","vehicle":"obd2","can":"auto 500/250","probe_kbps":500,"emit_hz":20,"run_v":13.2,"cutoff_v":11.8,"pids":"0C,11"}}
+ "cfg":{"hw":"12v","vehicle":"obd2","can":"auto 500/250","probe_kbps":500,"emit_hz":20,"run_v":13.20,"cutoff_v":11.80,"supply_cal":1.010,"pids":"0C,11"}}
 ```
 
-The `V` console command prints the same information.
+The `V` console command prints the same settings, as text.
 
 ## Limits
 

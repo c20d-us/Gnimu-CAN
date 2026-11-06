@@ -15,7 +15,11 @@
 //   - prints a status line once a second: uptime, free heap, the A0 voltage
 //     (and the supply it implies through the carrier's ÷11 divider), and
 //     whether a BLE central is connected;
-//   - echoes each line typed on the console, and restarts on "R".
+//   - echoes each line typed on the console, and restarts on "R";
+//   - LED diagnostics on the console: "ON" and "OFF" hold the LED, "BLINK"
+//     goes back to blinking, and the status line shows how many times the
+//     LED pin changed level since the previous line, as read back from the
+//     pin (2 while blinking, 0 while held).
 //
 // It touches no CAN pins. D8 (CAN_SILENT) is left as an input so the CAN Pal's
 // pull-up keeps it listen-only.
@@ -42,6 +46,12 @@ constexpr float kDivider = 11.0f;         // 100k + 10k
 constexpr uint32_t kStatusPeriodMs = 1000;
 constexpr uint32_t kSerialWaitMs = 3000;
 
+enum class LedMode { Blink, On, Off };
+
+LedMode ledMode = LedMode::Blink;
+bool ledLevel = HIGH;  // last level written; HIGH is off (active low)
+bool ledReadback = HIGH;
+uint32_t ledChanges = 0;  // pin level changes seen since the last status line
 bool bleConnected = false;
 bool bleOk = false;
 String lineBuffer;
@@ -105,9 +115,12 @@ void startBle() {
 
 void printStatus() {
   const uint32_t pinMv = analogReadMilliVolts(kSensePin);
-  Serial.printf("up %lus | heap %lu | A0 %.3fV (supply %.2fV) | BLE %s\n", (unsigned long)(millis() / 1000),
-                (unsigned long)ESP.getFreeHeap(), pinMv / 1000.0f, pinMv * kDivider / 1000.0f,
-                !bleOk ? "failed" : bleConnected ? "connected" : "advertising");
+  const char *mode = ledMode == LedMode::Blink ? "blink" : ledMode == LedMode::On ? "held on" : "held off";
+  Serial.printf("up %lus | heap %lu | A0 %.3fV (supply %.2fV) | BLE %s | LED %s, %lu changes\n",
+                (unsigned long)(millis() / 1000), (unsigned long)ESP.getFreeHeap(), pinMv / 1000.0f,
+                pinMv * kDivider / 1000.0f, !bleOk ? "failed" : bleConnected ? "connected" : "advertising", mode,
+                (unsigned long)ledChanges);
+  ledChanges = 0;
 }
 
 void handleLine(const String &line) {
@@ -116,7 +129,12 @@ void handleLine(const String &line) {
     Serial.flush();
     ESP.restart();
   }
-  Serial.printf("Echo: '%s' (R = restart)\n", line.c_str());
+  if (line == "ON" || line == "OFF" || line == "BLINK") {
+    ledMode = line == "ON" ? LedMode::On : line == "OFF" ? LedMode::Off : LedMode::Blink;
+    Serial.printf("LED: %s\n", line.c_str());
+    return;
+  }
+  Serial.printf("Echo: '%s' (R = restart; ON, OFF, BLINK = LED)\n", line.c_str());
 }
 
 void pollConsole() {
@@ -141,6 +159,10 @@ void setup() {
   pinMode(D8, INPUT);
   analogReadResolution(12);
 
+  // Serial is the C6's USB serial port. With a cable attached but no terminal
+  // reading, its buffer fills and each write would wait 100 ms, stalling the
+  // loop (and the LED). Drop output instead.
+  Serial.setTxTimeoutMs(0);
   Serial.begin(115200);
   const uint32_t start = millis();
   while (!Serial && millis() - start < kSerialWaitMs) {
@@ -150,13 +172,24 @@ void setup() {
   printBoardInfo();
   startBle();
   Serial.println("Status every second. Type a line and press Enter to test console input.");
+  Serial.println("LED: type ON, OFF or BLINK.");
 }
 
 void loop() {
   static uint32_t lastStatus = 0;
   const uint32_t now = millis();
 
-  digitalWrite(kLedPin, (now / 500) % 2 ? HIGH : LOW);
+  switch (ledMode) {
+    case LedMode::Blink: ledLevel = (now / 500) % 2 ? HIGH : LOW; break;
+    case LedMode::On: ledLevel = LOW; break;
+    case LedMode::Off: ledLevel = HIGH; break;
+  }
+  digitalWrite(kLedPin, ledLevel);
+  const bool readback = digitalRead(kLedPin);
+  if (readback != ledReadback) {
+    ledReadback = readback;
+    ledChanges++;
+  }
 
   if (now - lastStatus >= kStatusPeriodMs) {
     lastStatus = now;

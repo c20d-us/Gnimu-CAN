@@ -1,36 +1,64 @@
+// Gnimu-CAN - vehicle CAN telemetry over BLE
+// Copyright (C) 2026 Chris Halstead
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 #pragma once
 
-#include <Arduino.h>
-#include <driver/gpio.h>
+// Gnimu-CAN settings: the values chosen for a build. Each one is checked when
+// the firmware compiles (src/app/SystemConfig.h), so a value out of range
+// fails the build with a message saying why. The constants the firmware's
+// timing and safety depend on are in src/app/SystemConfig.h, not here.
 
-// ---- CAN transceiver wiring (XIAO ESP32C6) ----
-// The C6 has no on-board transceiver; wire an external 3.3 V part
-// (SN65HVD230, TCAN332, ...) to these pins.
-constexpr gpio_num_t CAN_TX_PIN = GPIO_NUM_16;  // XIAO D6
-constexpr gpio_num_t CAN_RX_PIN = GPIO_NUM_17;  // XIAO D7
+#include <stdint.h>
 
-// Most OBD-II CAN vehicles run 500 kbit/s; some older ones use 250 kbit/s.
-constexpr uint32_t CAN_BITRATE = 500000;
+namespace gnimu {
+namespace config {
 
-// ---- OBD-II polling ----
-constexpr uint32_t OBD_RESPONSE_TIMEOUT_MS = 50;  // per request
-constexpr uint32_t OBD_POLL_GAP_MS = 10;          // pause between requests
+// BLE
 
-// Mode 01 PIDs polled round-robin.
-constexpr uint8_t OBD_PIDS[] = {
-  0x0C,  // Engine RPM
-  0x0D,  // Vehicle speed
-  0x05,  // Coolant temperature
-  0x11,  // Throttle position
-  0x04,  // Calculated engine load
-  0x0F,  // Intake air temperature
-};
+// Gnimu frames sent per second while a client is subscribed. 20 to start; up
+// to about 30 is worthwhile, a little above the GNSS rate of the app's own
+// position source (docs/architecture.md, Emit rate).
+constexpr uint32_t kEmitRateHz = 20;
+// Advertised name is "<prefix> <10-digit device ID>"; the prefix is also the
+// Device Information model string and the schema's product name.
+constexpr char kBleNamePrefix[] = "Gnimu-CAN";
+// Device Information manufacturer string.
+constexpr char kBleManufacturer[] = "Gnimu";
 
-// ---- BLE ----
-constexpr const char *BLE_DEVICE_NAME = "Gnimu-CAN";
-constexpr const char *BLE_SERVICE_UUID = "9074beb4-2f1a-4b5f-9818-fe2d2277ef05";
-constexpr const char *BLE_READING_CHAR_UUID = "0752d3c3-ceaf-462f-a944-bcc06c57284b";
+// Supply voltage
 
-// Version byte at the start of every notification; bump on format changes.
-// See docs/ble-protocol.md.
-constexpr uint8_t BLE_PROTOCOL_VERSION = 1;
+// The ADC reads slightly off; this corrects it. Measure the supply with a
+// meter or a bench supply's display, read the Supply value from the D report,
+// and set this to true / reported. 1.0 = no correction. The first bench board
+// read about 1% low.
+constexpr float kSupplyCalibration = 1.01f;
+// At or above: the alternator is charging, so the engine is running.
+constexpr float kEngineRunningV = 13.2f;
+// Below: protect the car's battery.
+constexpr float kLowVoltageCutoffV = 11.8f;
+
+// CAN
+
+// The gateway probe (docs/architecture.md, Bring-up): with the bus silent and
+// the supply at or above this, the car may be on behind a gateway, so the
+// device sends one single-shot OBD-II request to see. Below the 13.2V
+// engine-running threshold on purpose: cars with intelligent alternator
+// control can run their engine at 12.4-12.8V.
+constexpr float kGatewayProbeMinV = 12.4f;
+// The probe's bit rate, which nearly every gatewayed car uses.
+constexpr uint32_t kGatewayProbeBitrate = 500000;
+
+// OBD-II polling
+
+// How often each channel is asked for. The car's reply rate is shared between
+// the channels, so these are targets: the D report and status line show the
+// rate each one actually gets.
+constexpr uint32_t kRpmPeriodMs = 40;       // 25 Hz
+constexpr uint32_t kThrottlePeriodMs = 40;  // 25 Hz
+// At or above this, with fresh RPM, the engine is running whatever the supply
+// voltage says.
+constexpr float kEngineRunningMinRpm = 400.0f;
+
+}  // namespace config
+}  // namespace gnimu
