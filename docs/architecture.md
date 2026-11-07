@@ -23,7 +23,7 @@ What "most cars" means here:
 
 ## Hardware
 
-The first target is the **12V CAN carrier (XIAO) v1** from [Gnimu-PCB](https://github.com/c20d-us/Gnimu-PCB/tree/main/boards/gnimu-can), connected to the car through the OBD-II helper board.
+The first target is the **12V CAN carrier (XIAO) v1.0** from [Gnimu-PCB](https://github.com/c20d-us/Gnimu-PCB/tree/main/boards/gnimu-can), connected to the car through the OBD-II helper board.
 
 | Part | Role |
 |---|---|

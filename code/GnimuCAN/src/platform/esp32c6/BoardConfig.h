@@ -12,7 +12,7 @@ namespace board {
 // The Gnimu-CAN 12V carrier (XIAO ESP32C6 + Adafruit CAN Pal). The breadboard
 // prototype is wired the same way.
 constexpr char kHardwareName[] = "12v";
-constexpr char kHardwareRevision[] = "XIAO ESP32C6, 12V carrier v1";
+constexpr char kHardwareRevision[] = "XIAO ESP32C6, 12V carrier v1.0";
 
 constexpr uint8_t kSupplySensePin = 0;  // D0/A0: V12_SENSE
 constexpr uint8_t kCanSilentPin = 19;   // D8: CAN Pal S, high = listen-only (R1 pull-up)

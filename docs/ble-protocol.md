@@ -26,7 +26,7 @@ It also provides the standard Device Information Service (`0x180A`):
 | Model Number | `Gnimu-CAN` |
 | Serial Number | The 10-digit device ID |
 | Firmware Revision | The firmware version, such as `0.1.0` |
-| Hardware Revision | `XIAO ESP32C6, 12V carrier v1` |
+| Hardware Revision | `XIAO ESP32C6, 12V carrier v1.0` |
 
 ## What Gnimu-CAN fills
 
