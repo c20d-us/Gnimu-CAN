@@ -1,10 +1,10 @@
 # Architecture
 
-This page describes how the Gnimu-CAN firmware is put together. Everything here is built and bench-tested except [sleep and the low-voltage cutoff's action](#sleep-and-the-cutoff) and [vehicle profiles](#vehicle-profiles), which are still design; those sections say so. The [open questions](#open-questions) at the end still need answers.
+This page describes how the Gnimu-CAN firmware is put together. Everything here is built and bench-tested except [sleep and the low-voltage cutoff's action](#sleep-and-the-cutoff) and [vehicle profiles](#vehicle-profiles). The [open questions](#open-questions) at the end still need answers.
 
-Gnimu-CAN reads vehicle data from CAN and streams it over BLE to a third-party app, the first being [AutoX Data Logger](https://autoxdrivermod.com), as a custom BLE sensor. It follows the shape of the [Gnimu](https://github.com/c20d-us/Gnimu) firmware: the same layers, fixed-rate scheduler, run-state machine, boot log, console and diagnostics.
+Gnimu-CAN reads vehicle data from CAN, either directly or via OBD-II PIDs, and streams it over BLE to a third-party app as a custom BLE sensor. It follows the shape of the [Gnimu](https://github.com/c20d-us/Gnimu) firmware: the same layers, fixed-rate scheduler, run-state machine, boot log, console and diagnostics.
 
-The design goal is the same as Gnimu's: **consistency**. The app gets a packet at a fixed rate (e.g., 20 Hz) no matter how fast or slow the car answers, and the firmware makes it visible how fresh each value really is.
+The design goal is the same as Gnimu's: **consistency**. The receiving app gets a packet at a fixed rate (e.g., 30 Hz) no matter how fast or slow the car answers.
 
 ---
 
@@ -30,12 +30,12 @@ The first target is the **12V CAN carrier (XIAO) v1.0** from [Gnimu-PCB](https:/
 | Seeed XIAO ESP32C6 | MCU. Its TWAI controller is the CAN controller. |
 | Adafruit CAN Pal | CAN transceiver, powered from the XIAO's 3V3. |
 | Pololu D24V7F5 | 12V to 5V buck regulator, feeding the XIAO's 5V pin through a Schottky diode. |
-| OBD-II helper | Breaks out CAN_H, CAN_L, GND and +12V (OBD pin 16) from the plug. |
+| OBD-II helper | Breaks out CAN_H, CAN_L, GND and +12V (OBD pin 16) from the J1962 plug. |
 
 | XIAO pin | GPIO | Net | Use |
 |---|---|---|---|
 | D0/A0 | 0 | `V12_SENSE` | Switched 12V through a ÷11 divider (100kΩ + 10kΩ). 14.8V reads as 1.35V. |
-| D8 | 19 | `CAN_SILENT` | CAN Pal S pin. R1 pulls it high, so the transceiver is **listen-only until the firmware drives it low**. |
+| D8 | 19 | `CAN_SILENT` | CAN Pal S pin. R1 on the PCB pulls it high, so the transceiver is listen-only until the firmware drives it low. |
 | D9 | 20 | `CAN_TX` | TWAI TX |
 | D10 | 18 | `CAN_RX` | TWAI RX |
 | — | 15 | user LED | The XIAO's single yellow LED, active low. |
@@ -44,17 +44,17 @@ What follows from the hardware:
 
 - **The device is powered whenever the car's battery is connected.** OBD pin 16 is unswitched. The carrier's switch (J3) can cut power by hand, but the firmware has no way to cut its own. Keeping the parked current low is a firmware job (see [Power](#power-and-sleep)).
 - **Listen-only is the hardware default.** A blank or crashed MCU can't put anything on the car's bus. The firmware drives `CAN_SILENT` low only once it has confirmed the bit rate, or for the single frame of a [gateway probe](#bring-up).
-- **The firmware can see the vehicle's supply voltage.** That tells it whether the engine is running (alternator charging, about 13.5–14.8V) or the car is parked (about 12.0–12.7V), and warns it before it flattens the battery.
-- **A USB console in the car needs the right order.** The XIAO's 5V pin is the USB connector's VBUS line, so a running device puts about 4.8V on it, and a USB-C host (such as a MacBook) won't attach to a VBUS that already has voltage on it. To connect a laptop to a device in the car:
+- **The firmware can see the vehicle's supply voltage.** That provides evidence of whether the engine is running (alternator charging, about 13.5–14.8V) or the car is parked (about 12.0–12.7V), and warns it before it flattens the battery.
+- **A USB console in the car needs a specific connection sequence.** The XIAO's 5V pin is the USB connector's VBUS line, so a device plugged into the OBD-II port with the switch on puts about 4.8V on it, and a USB-C host (such as a MacBook) won't attach to a VBUS that already has voltage present. To connect a laptop to a device plugged into the car's OBD-II port:
   1. Switch the device off with the carrier's power switch (J3).
   2. Plug the USB cable into the laptop and the device.
   3. Switch the device back on.
 
-  Plugging the laptop in before connecting the device to the OBD-II port works the same way. A USB-A port or hub on the laptop avoids the issue entirely. While both are connected, D2 keeps the laptop's 5V and the car's regulator apart.
+Plugging the laptop in before connecting the device to the OBD-II port works the same way. A USB-A port or hub on the laptop avoids the issue entirely. While both are connected, D2 keeps the laptop's 5V and the car's regulator apart.
 
-The LiPo carrier has the same CAN section, with `VBAT_SENSE` (÷2) on A0 instead. It would be a second hardware profile, as in Gnimu, with a battery power policy instead of the vehicle one. It's out of scope for v1.
+The LiPo carrier has the same CAN section, with `VBAT_SENSE` (via ÷2 divider) on A0 instead. It would be a second hardware profile, as in Gnimu, with a battery power policy instead of the vehicle one. It's out of scope for v1 work, and may never get built.
 
-The breadboard prototype runs the 12V carrier build unchanged. An adjustable bench supply stands in for the car's voltage, so the power logic sees real readings through the real divider (see [Bench rig](#bench-rig)).
+A breadboard prototype runs the 12V carrier build unchanged. An adjustable bench supply stands in for the car's voltage, so the power logic sees real readings through the real divider (see [Bench rig](#bench-rig)).
 
 ---
 
@@ -88,25 +88,24 @@ Collecting and emitting are independent:
 
 - The **poller** runs whenever an ECU answers, whether or not an app is connected, so the latest values are already there when one subscribes.
 - The **emitter** runs only while a client is subscribed. At a fixed rate it takes the latest values and sends one packet. It never waits on the bus.
-- The frame's valid mask says which fields hold a value. AutoXDL ignores it; Gnimu tools use it. The poller also keeps each channel's request, reply and timeout counts for the console diagnostics.
+- The frame's valid mask says which fields hold a value. The poller also keeps each channel's request, reply and timeout counts for console diagnostics.
 
 ### Emit rate
 
-**20 Hz is a starting point, not a design limit.** The rate is one setting, `kEmitRateHz` in `Config.h`, and the `emit` job's period follows from it. The plan is to raise it as far as testing shows is worthwhile, or lower it if something can't keep up. About 30 Hz is the likely upper end, a little above the GNSS rate for the reasons below.
+**20 Hz is a starting point, not a design limit.** The rate is one setting, `kEmitRateHz` in `Config.h`, and the `emit` job's period follows from it. The plan is to raise it as far as testing shows is worthwhile, or lower it if something can't keep up. Somewhere in the 30-50 Hz range is the target, above the Gnimu GNSS rates for the reasons below.
 
 What sets the useful ceiling:
 
-- **How fast the car answers.** Emitting faster than a channel updates only repeats values. The per-channel rates in the diagnostics show where that point is. With two channels sharing a typical car's 20–60 replies per second, it's roughly 10–30 Hz per channel. Getting more real data means raising the poll rate: fewer channels, multi-PID requests, or a vehicle profile that reads broadcast frames instead of polling.
-- **The BLE connection.** The phone sets the connection interval. iOS typically allows down to 15 ms, which is about 66 connection events per second. Going above roughly 50 Hz needs testing with the real phone and app.
-- **What AutoXDL records.** Confirmed: the app accepts custom sensor data at whatever rate the device sends it, then aligns it to the GNSS source's cadence (20–25 Hz with Gnimu). Each recorded row carries the latest value received. Emitting faster than the GNSS rate doesn't add rows.
+- **How fast the car answers.** Emitting faster than a channel updates only repeats values. The per-channel rates in the diagnostics show where that point is. With two channels sharing a typical car's 20–60 replies per second, it's roughly 10–30 Hz per channel. Getting more real data means raising the poll rate: fewer channels, multi-PID requests, or a vehicle profile that reads broadcast frames directly from the CAN bus instead of polling.
+- **The BLE connection.** The consuming app sets the connection interval. iOS typically allows down to 15 ms, which is about 66 connection events per second. Going above roughly 50 Hz needs testing with a real phone and app.
 
 How old the value in a row is has three parts:
 
-- **Poll age:** how long ago the car answered. With a channel updating at *P* Hz, this averages about 1/(2*P*): 17–50 ms at 10–30 Hz. **This is the big one.**
+- **Poll age:** how long ago the car answered. With a channel updating at *P* Hz, this averages about 1/(2*P*): 17–50 ms at 10–30 Hz.
 - **Emit age:** how long ago the latest packet left the device. At emit rate *E*, it averages 1/(2*E*): 25 ms at 20 Hz, 20 ms at 25 Hz, 10 ms at 50 Hz.
-- **BLE delivery:** packets arrive at the phone in the connection's events (every 15–30 ms or so), which adds a similar amount whatever *E* is.
+- **BLE delivery:** packets arrive at the consuming device in the connection's events (every 15–30 ms or so), which adds a similar amount whatever *E* is.
 
-So raising the emit rate shaves only a few milliseconds off the average age. The real reason to run **a little above** the GNSS rate is different. The device's clock and the GNSS receiver's clock aren't synchronised. At exactly the same nominal rate, the two drift past each other, and now and then a GNSS interval gets no new packet, so that row repeats the previous value. A margin of a few Hz makes that rare. The real gains in freshness come from polling the car faster.
+So raising the emit rate shaves only a few milliseconds off the average age. The real reason to run **above** the GNSS rate is different. The device's clock and the GNSS receiver's clock aren't synchronised. At exactly the same nominal rate, the two drift past each other, and now and then a GNSS interval gets no new packet, so that row repeats the previous value. A margin of a few Hz makes that rare. The real gains in freshness come from polling the car faster.
 
 The emitter keeps its rate fixed whatever happens upstream. That's the consistency goal: a higher rate is only worth it if it holds steady.
 
@@ -323,7 +322,7 @@ Two breadboards, joined by a CAN_H/CAN_L/GND pair:
 - **Device:** a XIAO ESP32C6 and a CAN Pal wired as on the 12V carrier, with R1 on `CAN_SILENT` and the ÷11 divider on A0. An adjustable bench supply (0–30V) on the 12V input powers it through the buck regulator and plays the car's voltage: about 12.4V parked, about 14.2V engine running, below 11.8V for the low-voltage cutoff, and anything in between to test the transitions. Set its current limit to about 150–200 mA. Keep below about 16V if the TVS diode (D1) is fitted, since it starts conducting around 17V. Keep the Schottky diode (D2) between the regulator and the XIAO's 5V pin: the USB cable for the console will be plugged in at the same time.
 
   **Connect USB before turning the supply on.** The XIAO's 5V pin is the USB connector's VBUS line, so with the supply on, about 4.8V sits on VBUS before a cable is attached. A USB-C host (such as a MacBook) checks that VBUS is at 0V before it attaches, sees the voltage, and doesn't enumerate the board. In the other order it attaches normally and stays attached. A USB-A port or hub doesn't make that check. Found on the bench: the board appeared the moment the supply was switched off. The same applies to the 12V carrier if a USB-C cable is plugged into a board already running from the car.
-- **Fake ECU:** a second XIAO ESP32C6 and CAN Pal running a small sketch (`tools/fake_ecu/`) that answers Mode 01 requests on `0x7E8` with changing RPM and throttle values. It has settings for a reply delay, so it can stand in for slow or fast ECUs, and for staying silent until asked, like a gatewayed port. It runs from a 5V plug-in supply on the XIAO's 5V pin through a Schottky diode (a 1N5819, like D2), so it's safe to have its USB cable plugged in too. It has no voltage divider or buck regulator.
+- **Fake ECU:** a second XIAO ESP32C6 and CAN Pal running a small sketch (`tools/fake_ecu/`) that answers Mode 01 requests on `0x7E8` with changing RPM and throttle values. It has settings for a reply delay, so it can stand in for slow or fast ECUs, and for staying silent until asked, like a gatewayed port. It runs from the USB-C or from the 5V supply from the Gnimu-CAN breadboard that has an in-line Schottky diode (a 1N5819, like D2), so it's safe to have its USB cable plugged in too. It has no voltage divider or buck regulator.
 - **Termination:** both CAN Pals' termination switches **on** for the bench, so the bus has a 120Ω end on each side as a car does. Both must be **off** before either is used in a car.
 
 Without the fake ECU, the device alone still exercises boot, states, voltage sense, BLE and, with the supply at or above the 12.4V probe threshold, the gateway probe's failure path (no node to acknowledge it). With it, the whole OBD path can be tested: discovery, the gateway probe's success path, polling rates and the diagnostics.
