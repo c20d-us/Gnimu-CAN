@@ -92,6 +92,8 @@ Collecting and emitting are independent:
 
 ### Emit rate
 
+Gnimu-CAN has no GNSS, so under the protocol's [rate rule](https://github.com/c20d-us/Gnimu-protocol/blob/main/docs/frame.md#rate) it sends at a fixed rate of its own, and the app aligns its data to the app's GNSS source. (A device with GNSS sends one frame per GNSS solution instead; an all-in-one device with CAN would pace its frames by GNSS too.)
+
 **20 Hz is a starting point, not a design limit.** The rate is one setting, `kEmitRateHz` in `Config.h`, and the `emit` job's period follows from it. The plan is to raise it as far as testing shows is worthwhile, or lower it if something can't keep up. Somewhere in the 30-50 Hz range is the target, above the Gnimu GNSS rates for the reasons below.
 
 What sets the useful ceiling:
@@ -332,3 +334,5 @@ Without the fake ECU, the device alone still exercises boot, states, voltage sen
 ## Open questions
 
 1. **Sleep thresholds and wake interval.** Set once the parked current is measured.
+2. **Gateway probes on a timer wake.** Every wake from deep sleep is a fresh boot, and a parked car can sit above the 12.4V probe threshold: the first M2 reading was 12.6V at the battery after 10+ days parked. As built, each wake could send up to 5 probes, not just the first boot after power-up. The sleep work has to bound that, for example by not probing on a timer wake, or by keeping the probe count across sleep.
+3. **Supply voltage through a drive and after shutdown.** The M2's first readings, at the battery posts, were 12.6V parked and 15.1–15.15V in the first 4 minutes after a cold start: the charging phase. Still needed: the low phase of intelligent alternator control while cruising, which the 12.4V probe threshold and the RPM override are built for, and the surface-charge decay after switching off, which decides how soon voltage alone stops saying "engine running". The device's own status line (`L`) can log both on the first car test. Its reading is at OBD pin 16, after the car's wiring and fuse, so it may sit slightly below the battery-post figures.

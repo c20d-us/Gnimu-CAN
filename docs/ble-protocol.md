@@ -45,7 +45,7 @@ More vehicle fields come as the firmware polls more PIDs. Each new one fills its
 
 ## Rate
 
-While a client is subscribed, the device sends a frame at a fixed rate: 20 Hz to start, and up to about 30 Hz once testing shows what's worthwhile (see [Emit rate](architecture.md#emit-rate)). Every frame carries the latest value of each field.
+Gnimu-CAN has no GNSS, so under the protocol's [rate rule](https://github.com/c20d-us/Gnimu-protocol/blob/main/docs/frame.md#rate) it sends at a fixed rate. While a client is subscribed, that's 20 Hz to start, with a target in the 30–50 Hz range once testing shows what's worthwhile (see [Emit rate](architecture.md#emit-rate)). Every frame carries the latest value of each field.
 
 AutoXDL accepts frames at whatever rate the device sends them and aligns the values to its GNSS source's cadence, with each recorded row carrying the latest value.
 

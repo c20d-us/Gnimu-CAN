@@ -16,9 +16,9 @@ namespace config {
 
 // BLE
 
-// Gnimu frames sent per second while a client is subscribed. 20 to start; up
-// to about 30 is worthwhile, a little above the GNSS rate of the app's own
-// position source (docs/architecture.md, Emit rate).
+// Gnimu frames sent per second while a client is subscribed. 20 to start; the
+// target is 30-50, above the GNSS rate of the app's own position source
+// (docs/architecture.md, Emit rate).
 constexpr uint32_t kEmitRateHz = 20;
 // Advertised name is "<prefix> <10-digit device ID>"; the prefix is also the
 // Device Information model string and the schema's product name.

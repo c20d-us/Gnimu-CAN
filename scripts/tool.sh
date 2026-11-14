@@ -4,11 +4,15 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 # Usage: scripts/tool.sh <name> [--flash] [--monitor] [--port <port>]
+#        scripts/tool.sh <name> --dump <file> [--port <port>]
 #        scripts/tool.sh --list
 #
 # Builds the diagnostic sketch tools/<name> for the XIAO ESP32C6 into
 # build/tools/<name>, then optionally flashes it and opens the serial monitor.
 # --monitor on its own skips the build and just opens the console.
+# --dump sends the tool's DUMP command and saves what it prints between its
+# "#BEGIN" and "#END" lines to <file> (voltage_log's log, for one), without
+# building or flashing.
 #
 # Builds with all warnings on and fails on any warning in the tool's own
 # source. Warnings from the core and its libraries are shown but don't fail.
@@ -24,6 +28,7 @@ baud=115200
 
 usage() {
   echo "Usage: $0 <name> [--flash] [--monitor] [--port <port>]" >&2
+  echo "       $0 <name> --dump <file> [--port <port>]" >&2
   echo "       $0 --list" >&2
   exit 2
 }
@@ -39,12 +44,14 @@ name=""
 flash=0
 monitor=0
 port=""
+dump=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --list) list_tools; exit 0 ;;
     --flash) flash=1 ;;
     --monitor) monitor=1 ;;
     --port) [[ $# -ge 2 ]] || usage; port="$2"; shift ;;
+    --dump) [[ $# -ge 2 ]] || usage; dump="$2"; shift ;;
     -*) usage ;;
     *) [[ -z "$name" ]] || usage; name="$1" ;;
   esac
@@ -88,6 +95,52 @@ for entry in data.get("detected_ports", []):
 }
 
 build_dir="build/tools/$name"
+
+# --dump: ask the running tool for its log and save it. Standard library only:
+# raw mode on the port, send DUMP, keep what comes between #BEGIN and #END.
+if [[ -n "$dump" ]]; then
+  [[ $flash -eq 0 && $monitor -eq 0 ]] || usage
+  [[ -n "$port" ]] || port="$(find_port)"
+  echo "Dumping $name's log from $port to $dump"
+  exec python3 -I - "$port" "$dump" <<'PY'
+import os, select, sys, time, tty
+
+port, out = sys.argv[1], sys.argv[2]
+fd = os.open(port, os.O_RDWR | os.O_NOCTTY)
+tty.setraw(fd)
+
+def read_some(timeout):
+    ready, _, _ = select.select([fd], [], [], timeout)
+    return os.read(fd, 4096) if ready else b""
+
+# Drop whatever the tool printed before we asked (its live lines).
+end = time.time() + 0.3
+while time.time() < end:
+    read_some(0.05)
+os.write(fd, b"DUMP\n")
+
+buf = b""
+last = time.time()
+while b"\n#END" not in buf and not buf.startswith(b"#END"):
+    chunk = read_some(0.2)
+    if chunk:
+        buf += chunk
+        last = time.time()
+    elif time.time() - last > 5:
+        sys.exit("No complete dump after 5 s of silence (%d bytes received); is %s running the tool?" % (len(buf), port))
+os.close(fd)
+
+start = buf.find(b"#BEGIN")
+if start < 0:
+    sys.exit("The reply had no #BEGIN line")
+body = buf[buf.index(b"\n", start) + 1:]
+body = body[:body.rindex(b"#END")]
+with open(out, "wb") as f:
+    f.write(body)
+lines = body.count(b"\n")
+print("Saved %d bytes, %d lines, to %s" % (len(body), lines, out))
+PY
+fi
 
 # --monitor alone just opens the console.
 if [[ $flash -eq 0 && $monitor -eq 1 ]]; then
