@@ -25,8 +25,8 @@
 // carrier's pull-up R1 holds the CAN Pal's S pin high): the device never
 // transmits and can't disturb the car's bus.
 //
-// The log lives in the flash data partition (LittleFS), about 1.5 MB: roughly
-// 16 hours of samples. It survives power cycles and reflashing this sketch,
+// The log lives in the flash data partition (LittleFS), about 1.4 MB usable: roughly
+// 13 hours of samples. It survives power cycles and reflashing this sketch,
 // and logging stops cleanly when it's full.
 //
 // Console commands (end with Enter):

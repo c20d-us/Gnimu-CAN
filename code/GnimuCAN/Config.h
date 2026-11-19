@@ -49,6 +49,33 @@ constexpr float kGatewayProbeMinV = 12.4f;
 // The probe's bit rate, which nearly every gatewayed car uses.
 constexpr uint32_t kGatewayProbeBitrate = 500000;
 
+// Sleep (docs/architecture.md, Sleep and the cutoff). Placeholders until the
+// parked current and the car's voltage after shutdown are measured on the
+// real board.
+
+// Parked (no fresh RPM, supply below engine running, bus silent) for this
+// long: sleep. A connected client doesn't keep the device awake.
+constexpr uint32_t kSleepAfterParkedS = 300;
+// How often a sleeping device wakes to check whether the car has started.
+// Shorter catches a start sooner; each check costs about half a second awake.
+constexpr uint32_t kParkedCheckIntervalS = 30;
+// The same, after the low-voltage cutoff: rarely, to protect the battery.
+constexpr uint32_t kCutoffCheckIntervalS = 600;
+// After a cutoff, the supply must rise above this to count as recovered, so
+// a battery hovering at the cutoff can't flip the device in and out of it.
+constexpr float kCutoffRecoverV = 12.1f;
+// A supply this much above the lowest wake-check reading since sleeping (the
+// first check sets it) means the alternator has started charging: wake fully. Catches a gatewayed car whose
+// engine runs below the engine-running level (intelligent alternator control).
+constexpr float kWakeRiseV = 0.3f;
+// A wake check reads the supply this much higher than the awake device does
+// (it runs with BLE and CAN off, so the board draws less): the check's
+// engine-running, cutoff and recovery levels are raised by it, so they mean
+// the same voltages as when awake. Per board: with the supply unchanged, it's
+// "checks read" minus "slept at" in the D report's wake line. The breadboard
+// read 0.05-0.15 V; measure the real board.
+constexpr float kWakeCheckOffsetV = 0.10f;
+
 // OBD-II polling
 
 // How often each channel is asked for. The car's reply rate is shared between

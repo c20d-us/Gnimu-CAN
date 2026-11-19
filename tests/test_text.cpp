@@ -44,6 +44,8 @@ static DeviceStatus worstCase() {
     c = {"Throttle", "rpm", 0xFF, true, UINT32_MAX, UINT32_MAX, UINT32_MAX, true, UINT32_MAX, 16383.75f};
   }
   d.obd.activity = VehicleActivity::EngineRunning;
+  d.sleep = {false, false, 99.0f, true, UINT32_MAX, UINT32_MAX, UINT32_MAX, true, "supply at the engine-running level",
+             "below cutoff", UINT32_MAX, 99.99f, 99.99f, 99.99f, 99.99f};
   return d;
 }
 

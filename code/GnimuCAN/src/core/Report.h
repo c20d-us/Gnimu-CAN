@@ -126,8 +126,8 @@ inline size_t formatReport(char *buf, size_t cap, const JobTable &t, const Devic
   o.put("Reset: %s\n", reset);
   o.put("State: %s\n", stateName(d.state));
   if (d.supply.valid) {
-    const unsigned long centiV = static_cast<unsigned long>(d.supply.volts * 100.0f + 0.5f);
-    o.put("Supply: %lu.%02luV, %s\n", centiV / 100, centiV % 100, supplyLevelName(d.supply.level));
+    const CentiVolts v = centiVolts(d.supply.volts);
+    o.put("Supply: %lu.%02luV, %s\n", v.whole, v.hundredths, supplyLevelName(d.supply.level));
   } else {
     o.put("Supply: no reading yet\n");
   }
@@ -151,6 +151,9 @@ inline size_t formatReport(char *buf, size_t cap, const JobTable &t, const Devic
   if (d.obd.ecuFound) {
     o.put("OBD: ECU 0x%03lX, requests to 0x%03lX\n", static_cast<unsigned long>(d.obd.responseId),
           static_cast<unsigned long>(d.obd.requestId));
+  } else if (d.obd.nothingToPoll) {
+    o.put("OBD: ECU 0x%03lX supports none of the polled PIDs - not polling\n",
+          static_cast<unsigned long>(d.obd.responseId));
   } else {
     o.put("OBD: no ECU\n");
   }
@@ -174,6 +177,25 @@ inline size_t formatReport(char *buf, size_t cap, const JobTable &t, const Devic
     o.put("\n");
   }
   o.put("Vehicle: %s\n", vehicleActivityName(d.obd.activity));
+  if (d.sleep.stayAwake) {
+    o.put("Sleep: staying awake (W to allow sleep)");
+  } else if (d.sleep.noSupply) {
+    o.put("Sleep: off - supply below %uV, running from USB", static_cast<unsigned>(d.sleep.noSupplyV));
+  } else if (d.sleep.parked) {
+    o.put("Sleep: parked for %lu of %lu s", static_cast<unsigned long>(d.sleep.parkedForMs / 1000),
+          static_cast<unsigned long>(d.sleep.sleepAfterMs / 1000));
+  } else {
+    o.put("Sleep: not parked");
+  }
+  o.put(", slept %lu times since power-up\n", static_cast<unsigned long>(d.sleep.sleepCount));
+  if (d.sleep.woke) {
+    const CentiVolts at = centiVolts(d.sleep.sleptAtV), lo = centiVolts(d.sleep.checkMinV),
+                     hi = centiVolts(d.sleep.checkMaxV), w = centiVolts(d.sleep.wokeAtV);
+    o.put("Sleep: this boot woke for %s after %lu checks asleep %s: slept at %lu.%02luV, checks read "
+          "%lu.%02lu-%lu.%02luV, woke at %lu.%02luV\n",
+          d.sleep.wokeFor, static_cast<unsigned long>(d.sleep.checks), d.sleep.asleepFor, at.whole, at.hundredths,
+          lo.whole, lo.hundredths, hi.whole, hi.hundredths, w.whole, w.hundredths);
+  }
   o.put("BLE: %s, MTU %u, sent %lu, failed %lu, refused %lu, max send %lu\xCE\xBCs\n",
         d.ble.connected ? "connected" : "disconnected", static_cast<unsigned>(d.ble.stats.mtu),
         static_cast<unsigned long>(d.ble.stats.sent), static_cast<unsigned long>(d.ble.stats.failed),

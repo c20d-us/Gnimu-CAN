@@ -5,15 +5,18 @@
 #pragma once
 
 #include "../core/DeviceStatus.h"
+#include "../core/BusSearch.h"
 #include "../core/ObdPoller.h"
 #include "../core/ProbePolicy.h"
 #include "../core/ResetReason.h"
 #include "../core/RunStateMachine.h"
 #include "../core/Scheduler.h"
+#include "../core/SleepPolicy.h"
 #include "../core/StatusLed.h"
 #include "../core/SupplyMonitor.h"
 #include "../peripherals/ble/BlePeripheral.h"
 #include "../platform/Clock.h"
+#include "../platform/DeepSleep.h"
 #include "Console.h"
 #include "Diagnostics.h"
 #include "SystemConfig.h"
@@ -59,8 +62,8 @@ class App {
   bool startCan();
   // Listens (silently) at `bitrate`, starting a new rate-check window.
   void listenAt(uint32_t bitrate);
-  // Clean frames in the current window confirm its rate.
-  void confirmTraffic(uint32_t bitrate);
+  // Clean frames confirm a rate: heard by listening, or answered a probe.
+  void confirmTraffic(uint32_t bitrate, bool byListening);
   // Gateway probe and ECU discovery each send one request and return; later
   // can-job runs take the reply or time it out (continueStep), so nothing
   // waits inside a job.
@@ -73,9 +76,19 @@ class App {
   void finishDiscovery(bool answered, uint32_t nowMs);
   // The polled ECU stopped answering: back to waiting, and listening.
   void vehicleLost();
+  // Waiting, with traffic confirmed, and the bus has gone quiet: the car has
+  // switched off or gone to sleep. Starts over: rate check, probes,
+  // discovery from its first interval.
+  void trafficStopped();
   // Copies what polling knows into obdSummary_ for the reports and the frame.
   void refreshObdSummary(uint32_t nowMs);
   VehicleActivity activity() const;
+  // A timer wake from deep sleep: a quick supply reading and a listen on the
+  // bus, then either back to sleep (never returns) or on into a full boot.
+  void wakeCheck(SleepRecord r);
+  // Goes into deep sleep for `kind`'s interval. Never returns.
+  [[noreturn]] void goToSleep(SleepKind kind);
+  static uint32_t checkIntervalS(SleepKind kind);
   [[noreturn]] void restart(RestartReason why);
   // Console C: the counters App owns.
   void clearStats();
@@ -89,15 +102,13 @@ class App {
   SupplyLevel loggedLevel_ = SupplyLevel::Unknown;
   ProbePolicy probe_;
   CanSummary canSummary_ = {};
-  uint32_t listenBitrate_ = 0;
-  uint32_t windowStartMs_ = 0;
-  uint32_t windowFrames_ = 0;
+  // Finding the bus, the gateway probe's silence and ECU discovery
+  // (core/BusSearch.h); this App does the CAN calls it asks for.
+  BusSearch search_;
   // Polled channels, in the order of kPollPids.
   enum : size_t { kRpmChannel, kThrottleChannel, kPollChannels };
   ObdPoller<kPollChannels> poller_;
   ObdSummary obdSummary_ = {};
-  uint32_t nextDiscoveryMs_ = 0;
-  uint8_t discoveryTries_ = 0;
   VehicleActivity loggedActivity_ = VehicleActivity::Unknown;
   // The request in progress, if any.
   enum class CanStep : uint8_t {
@@ -110,6 +121,14 @@ class App {
   uint32_t stepStartMs_ = 0;
   bool stepReplied_ = false;          // a PID 0x00 reply arrived during the step
   obd2::Mode01Reply stepReply_ = {};  // ... and this is it
+  // Sleep.
+  SleepPolicy sleepPolicy_;
+  SleepView sleepView_ = {};
+  bool stayAwake_ = false;      // the console's W
+  bool wokeFromSleep_ = false;  // this boot follows a wake check that found the car awake
+  SleepRecord wake_ = {};       // ... and what that check saw
+  WakeReason wokeFor_ = WakeReason::None;
+  float wokeAtV_ = 0.0f;
   StatusLed statusLed_;
   RunStateMachine machine_;
   uint8_t sequence_ = 0;  // the frame header's sequence number

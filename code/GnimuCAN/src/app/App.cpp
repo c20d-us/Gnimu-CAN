@@ -10,6 +10,7 @@
 #include "../core/BleJson.h"
 #include "../core/DeviceId.h"
 #include "../core/Obd2.h"
+#include "../core/TextOut.h"
 #include "../platform/Board.h"
 #include "../platform/CanPort.h"
 #include "../platform/HardwareId.h"
@@ -34,7 +35,6 @@ uint32_t nowMs() { return static_cast<uint32_t>(PlatformClock::nowUs() / 1000); 
 // Gnimu-CAN fills the vehicle and power blocks.
 constexpr uint8_t kCapabilities = frame::kCapVehicle | frame::kCapPower;
 
-constexpr uint32_t otherRate(uint32_t bitrate) { return bitrate == 500000 ? 250000 : 500000; }
 
 // The polled channels, in App's kRpmChannel, kThrottleChannel order.
 const uint8_t kPollPids[] = {0x0C, 0x11};
@@ -43,8 +43,8 @@ const char* const kPollNames[] = {"RPM", "Throttle"};
 const char* const kPollUnits[] = {"rpm", "%"};
 
 void logSupply(Console& console, const SupplyStatus& s) {
-  const unsigned long centiV = static_cast<unsigned long>(s.volts * 100.0f + 0.5f);
-  console.log("Supply: %lu.%02luV, %s", centiV / 100, centiV % 100, supplyLevelName(s.level));
+  const CentiVolts v = centiVolts(s.volts);
+  console.log("Supply: %lu.%02luV, %s", v.whole, v.hundredths, supplyLevelName(s.level));
 }
 
 }  // namespace
@@ -57,11 +57,16 @@ App::App()
                config::kSupplyCutoffHoldMs}),
       probe_({config::kGatewayProbeMinV, config::kProbeHoldMs, config::kProbeBackoffMs,
               config::kProbeMaxAttempts}),
+      search_({config::kCanRateWindowMs, config::kBusSilentMs,
+               {config::kDiscoveryRetryMs, config::kDiscoveryBackoffMs, config::kDiscoveryMaxBackoffMs,
+                config::kDiscoveryTriesPerStep}}),
       poller_(kPollPids, kPollPeriodsMs, config::kObdReplyTimeoutMs),
+      sleepPolicy_({config::kSleepAfterParkedS * 1000, config::kBusSilentMs, config::kSupplyCutoffHoldMs,
+                    config::kNoSupplyV}),
       statusLed_({config::kLedBlinkHalfMs, config::kLedFaultHalfMs, config::kLedFlashOnMs,
                   config::kLedFlashPeriodMs}),
       diagnostics_(console_, scheduler_.jobs(), scheduler_.allStats(), kJobs, loops_, machine_, supply_,
-                   canSummary_, obdSummary_, ble_, deviceId_, reset_) {
+                   canSummary_, obdSummary_, sleepView_, ble_, deviceId_, reset_) {
   // Here, not in the class: GCC only evaluates it once App is complete.
   static_assert(jobSpecsValid(kJobSpecs), "job specs out of id order, unnamed, or with a zero period");
   static_assert(kPollChannels <= kMaxObdChannels, "more polled channels than ObdSummary holds");
@@ -72,6 +77,9 @@ void App::begin() {
   // First, so boot is covered too: a hang anywhere from here on resets the
   // chip. Each boot step below feeds it.
   const bool watchdog = Watchdog::start();
+  // Before anything visible: most timer wakes go straight back to sleep.
+  SleepRecord sleepRecord;
+  if (DeepSleep::takeRecord(sleepRecord)) wakeCheck(sleepRecord);
   reset_ = makeResetRecord(ResetInfo::cause(), ResetInfo::takeRestartCode());
   PlatformClock::begin();
   StatusLedPort::begin();
@@ -88,6 +96,24 @@ void App::begin() {
   } else {
     console_.log("Watchdog: not started \xE2\x9D\x8C");
   }
+  // The sleep report's fixed fields: settings, and this boot's wake.
+  sleepView_.noSupplyV = config::kNoSupplyV;
+  sleepView_.sleepAfterMs = sleepPolicy_.config().parkedHoldMs;
+  sleepView_.sleepCount = DeepSleep::sleepCount();
+  sleepView_.woke = wokeFromSleep_;
+  if (wokeFromSleep_) {
+    sleepView_.wokeFor = wakeReasonText(wokeFor_);
+    sleepView_.asleepFor = sleepKindName(wake_.kind);
+    sleepView_.checks = wake_.checks;
+    sleepView_.sleptAtV = wake_.sleptAtV;
+    sleepView_.checkMinV = wake_.checkMinV;
+    sleepView_.checkMaxV = wake_.checkMaxV;
+    sleepView_.wokeAtV = wokeAtV_;
+    const CentiVolts v = centiVolts(wokeAtV_), lo = centiVolts(wake_.lowestV);
+    console_.log("Sleep: woke after %lu checks asleep %s: %s (%lu.%02luV, lowest %lu.%02luV) \xE2\x9C\x85",
+                 static_cast<unsigned long>(wake_.checks), sleepKindName(wake_.kind), wakeReasonText(wokeFor_),
+                 v.whole, v.hundredths, lo.whole, lo.hundredths);
+  }
 
   apply(machine_.boot());
 
@@ -103,7 +129,7 @@ void App::begin() {
   scheduler_.start();
   console_.log("%s.", stateName(machine_.state()));
   console_.log("Commands end with Enter: D = report, C = clear statistics counters, V = version, "
-               "P = protocol, R = restart.");
+               "P = protocol, R = restart, W = stay awake on/off.");
   console_.log("L = 1s status on/off (up to %lu lines), N = N status reports (0-%lu).",
                static_cast<unsigned long>(config::kStatusMaxCount),
                static_cast<unsigned long>(config::kStatusMaxCount));
@@ -186,9 +212,11 @@ bool App::startCan() {
       delay(5);
     }
     canSummary_.framesSeen += frames;
-    if (frames > 0 && CanPort::status().busErrors == 0) {
+    const bool clean = CanPort::status().busErrors == 0;
+    search_.bootListen(rate, frames, clean, nowMs());
+    if (frames > 0 && clean) {
       console_.log("CAN: controller started, listen-only \xE2\x9C\x85");
-      confirmTraffic(rate);
+      confirmTraffic(rate, true);
       return true;
     }
     Watchdog::feed();
@@ -201,26 +229,23 @@ bool App::startCan() {
 
 void App::listenAt(uint32_t bitrate) {
   CanPort::start(bitrate, true);
-  listenBitrate_ = bitrate;
-  windowStartMs_ = nowMs();
-  windowFrames_ = 0;
+  search_.listen(bitrate, nowMs());
 }
 
-void App::confirmTraffic(uint32_t bitrate) {
+void App::confirmTraffic(uint32_t bitrate, bool byListening) {
+  // Discovery starts straight away (search_.next() says Discover).
+  const bool firstHeard = search_.confirmed(bitrate, byListening, nowMs());
   canSummary_.trafficBitrate = bitrate;
+  if (firstHeard && !probe_.exhausted()) console_.log("CAN: bus heard by listening - no gateway probes this boot");
   if (CanPort::status().bitrate != bitrate || !CanPort::status().listenOnly) CanPort::start(bitrate, true);
-  listenBitrate_ = bitrate;
   console_.log("CAN: traffic at %lu kbit/s \xE2\x9C\x85", static_cast<unsigned long>(bitrate / 1000));
-  // Ask for an ECU straight away.
-  nextDiscoveryMs_ = nowMs();
-  discoveryTries_ = 0;
 }
 
 void App::discover() {
   // Active from here: the rate is confirmed, by listening or by a probe the
   // car answered, so transmitting at it is safe.
   const uint32_t now = nowMs();
-  CanPort::start(canSummary_.trafficBitrate, false);
+  CanPort::start(search_.trafficRate(), false);
   stepReplied_ = false;
   step_ = CanStep::Discovering;
   stepStartMs_ = now;
@@ -229,21 +254,13 @@ void App::discover() {
 
 void App::finishDiscovery(bool answered, uint32_t now) {
   step_ = CanStep::Idle;
-  const uint32_t rate = canSummary_.trafficBitrate;
+  const uint32_t rate = search_.trafficRate();
   if (!answered) {
-    discoveryTries_++;
-    if (discoveryTries_ >= config::kDiscoveryMaxTries) {
-      console_.log("OBD: no ECU answered after %u tries - checking the bus again",
-                   static_cast<unsigned>(discoveryTries_));
-      canSummary_.trafficBitrate = 0;
-      listenAt(rate);
-    } else {
-      console_.log("OBD: no ECU answered at %lu kbit/s - asking again in %lu s",
-                   static_cast<unsigned long>(rate / 1000),
-                   static_cast<unsigned long>(config::kDiscoveryRetryMs / 1000));
-      CanPort::start(rate, true);
-      nextDiscoveryMs_ = now + config::kDiscoveryRetryMs;
-    }
+    const uint32_t waitMs = search_.discoveryFailed(now);
+    console_.log("OBD: no ECU answered at %lu kbit/s (try %lu) - asking again in %lu s",
+                 static_cast<unsigned long>(rate / 1000), static_cast<unsigned long>(search_.failures()),
+                 static_cast<unsigned long>(waitMs / 1000));
+    CanPort::start(rate, true);
     return;
   }
 
@@ -253,18 +270,36 @@ void App::finishDiscovery(bool answered, uint32_t now) {
   const uint32_t responseId = obd2::kFirstResponseId + reply.ecu;
   // An ECU's physical request ID is its response ID minus 8.
   const uint32_t requestId = responseId - 8;
-  console_.log("OBD: ECU 0x%03lX answered, polling via 0x%03lX \xE2\x9C\x85", static_cast<unsigned long>(responseId),
-               static_cast<unsigned long>(requestId));
   poller_.start(requestId, bitmap, now);
+  bool anySupported = false;
+  for (size_t i = 0; i < kPollChannels; i++) anySupported = anySupported || poller_.channel(i).supported;
+  search_.ecuFound(anySupported);
+  if (anySupported) {
+    console_.log("OBD: ECU 0x%03lX answered, polling via 0x%03lX \xE2\x9C\x85", static_cast<unsigned long>(responseId),
+                 static_cast<unsigned long>(requestId));
+  } else {
+    console_.log("OBD: ECU 0x%03lX answered", static_cast<unsigned long>(responseId));
+  }
   for (size_t i = 0; i < kPollChannels; i++) {
     const PollChannel& c = poller_.channel(i);
     console_.log("OBD: PID %02X %s %s", static_cast<unsigned>(c.pid), kPollNames[i],
                  c.supported ? "supported \xE2\x9C\x85" : "not supported - not polled \xE2\x9D\x8C");
   }
+  if (!anySupported) {
+    // Nothing to ask for: stay waiting, ask no more until the bus goes quiet
+    // (search_.ecuFound), and leave the probe budget alone.
+    console_.log("OBD: ECU 0x%03lX supports none of the polled PIDs - not polling \xE2\x9D\x8C",
+                 static_cast<unsigned long>(responseId));
+    CanPort::start(search_.trafficRate(), true);
+    obdSummary_.nothingToPoll = true;
+    obdSummary_.responseId = responseId;
+    obdSummary_.requestId = requestId;
+    return;
+  }
   obdSummary_.ecuFound = true;
+  obdSummary_.nothingToPoll = false;
   obdSummary_.responseId = responseId;
   obdSummary_.requestId = requestId;
-  discoveryTries_ = 0;
   // A car that comes back later in this boot gets the full probe budget.
   probe_.reset();
   canSummary_.probes = 0;
@@ -316,8 +351,18 @@ void App::vehicleLost() {
                static_cast<unsigned long>(config::kVehicleLostMs / 1000));
   obdSummary_.ecuFound = false;
   canSummary_.trafficBitrate = 0;
-  listenAt(listenBitrate_);
+  search_.vehicleLost();
+  listenAt(search_.rate());
   apply(machine_.vehicleLost());
+}
+
+void App::trafficStopped() {
+  console_.log("CAN: no frames for %lu s - listening again",
+               static_cast<unsigned long>(config::kBusSilentMs / 1000));
+  canSummary_.trafficBitrate = 0;
+  obdSummary_.nothingToPoll = false;
+  search_.quiet();
+  listenAt(search_.rate());
 }
 
 void App::refreshObdSummary(uint32_t nowMs) {
@@ -366,11 +411,11 @@ void App::finishProbe(ProbeResult r) {
                static_cast<unsigned>(config::kProbeMaxAttempts), static_cast<unsigned long>(rate / 1000),
                probeResultText(r), r == ProbeResult::Answered ? " \xE2\x9C\x85" : "");
   if (r == ProbeResult::Answered) {
-    confirmTraffic(rate);
+    confirmTraffic(rate, false);
     return;
   }
   if (probe_.exhausted()) console_.log("CAN: no more gateway probes until the next boot");
-  listenAt(listenBitrate_);
+  listenAt(search_.rate());
 }
 
 void App::restart(RestartReason why) {
@@ -399,7 +444,7 @@ void App::canJob() {
   CanFrame f;
   while (CanPort::receive(f)) {
     canSummary_.framesSeen++;
-    windowFrames_++;
+    search_.frame(now);
     if (polling) {
       poller_.onFrame(f, now);
     } else if (step_ != CanStep::Idle && !stepReplied_) {
@@ -428,19 +473,29 @@ void App::canJob() {
     continueStep(now);
     return;
   }
-  if (canSummary_.trafficBitrate != 0) {
-    if (static_cast<int32_t>(now - nextDiscoveryMs_) >= 0) discover();
-    return;
+  // Bus errors matter only while still looking for traffic.
+  const bool clean = search_.trafficRate() != 0 || CanPort::status().busErrors == 0;
+  switch (search_.next(now, clean, probe_.due(search_.probeSilence(), now))) {
+    case BusAction::None:
+      break;
+    case BusAction::Confirm:
+      confirmTraffic(search_.rate(), true);
+      break;
+    case BusAction::Probe:
+      makeProbe();
+      break;
+    case BusAction::NextWindow:
+      listenAt(BusSearch::otherRate(search_.rate()));
+      break;
+    case BusAction::Discover:
+      discover();
+      break;
+    case BusAction::Quiet:
+      // The car has switched off: start over, rather than keep asking a bus
+      // nobody is on (whose requests nobody would acknowledge).
+      trafficStopped();
+      break;
   }
-  if (windowFrames_ > 0 && CanPort::status().busErrors == 0) {
-    confirmTraffic(listenBitrate_);
-    return;
-  }
-  if (probe_.due(true, now)) {
-    makeProbe();
-    return;
-  }
-  if (now - windowStartMs_ >= config::kCanRateWindowMs) listenAt(otherRate(listenBitrate_));
 }
 
 // One Gnimu frame per period while a client is connected, whether or not
@@ -467,15 +522,25 @@ void App::powerJob() {
   if (s.level != loggedLevel_) {
     loggedLevel_ = s.level;
     logSupply(console_, s);
-    // The cutoff's action (sleep) comes with the power work; until then it's
-    // reported, not acted on.
-    if (s.level == SupplyLevel::BelowCutoff) console_.log("Power: below cutoff - sleep not implemented yet");
   }
   const VehicleActivity a = activity();
   if (a != loggedActivity_) {
     loggedActivity_ = a;
     console_.log("Vehicle: %s", vehicleActivityName(a));
   }
+
+  const uint32_t now = nowMs();
+  const ObdChannelView& rpm = obdSummary_.channels[kRpmChannel];
+  const SleepInputs in = {rpm.fresh, rpm.fresh && rpm.value >= config::kEngineRunningMinRpm, s,
+                          search_.silentForMs(now), stayAwake_};
+  const SleepDecision d = sleepPolicy_.update(in, now);
+  // What changes as it runs; the rest of sleepView_ is set once, in begin().
+  sleepView_.stayAwake = stayAwake_;
+  sleepView_.parked = sleepPolicy_.parked();
+  sleepView_.noSupply = sleepPolicy_.noSupply();
+  sleepView_.parkedForMs = sleepPolicy_.parkedForMs(now);
+  if (d == SleepDecision::Parked) goToSleep(SleepKind::Parked);
+  if (d == SleepDecision::Cutoff) goToSleep(SleepKind::Cutoff);
 }
 
 void App::bleJob() { ble_.update(); }
@@ -493,6 +558,11 @@ void App::consoleJob() {
     case CommandKind::Restart:
       apply(machine_.restartRequested());
       break;
+    case CommandKind::ToggleStayAwake:
+      stayAwake_ = !stayAwake_;
+      console_.log(stayAwake_ ? "Sleep: staying awake until W again or a restart"
+                              : "Sleep: allowed again when parked");
+      break;
     case CommandKind::None:
     case CommandKind::Report:
     case CommandKind::Version:
@@ -502,6 +572,81 @@ void App::consoleJob() {
   }
   diagnostics_.handle(cmd);
   diagnostics_.tick(PlatformClock::nowUs());
+}
+
+uint32_t App::checkIntervalS(SleepKind kind) {
+  return kind == SleepKind::Parked ? config::kParkedCheckIntervalS : config::kCutoffCheckIntervalS;
+}
+
+void App::wakeCheck(SleepRecord r) {
+  // The supply first: averaged, then through the same calibration and
+  // filter seed as a full boot uses.
+  SupplyAdc::begin();
+  uint64_t sumMv = 0;
+  for (uint32_t i = 0; i < config::kWakeSupplySamples; i++) {
+    sumMv += SupplyAdc::readPinMv();
+    delayMicroseconds(500);
+  }
+  supply_.addSample(static_cast<uint32_t>(sumMv / config::kWakeSupplySamples), nowMs());
+  const float volts = supply_.status().volts;
+
+  // Then listen, at each bit rate in turn. Listen-only: the transceiver
+  // stays silent, so a parked car sees nothing from the device.
+  CanPort::init();
+  uint32_t frames = 0;
+  const uint32_t rates[] = {500000, 250000};
+  for (uint32_t rate : rates) {
+    if (frames > 0 || !CanPort::start(rate, true)) continue;
+    const uint32_t startMs = nowMs();
+    CanFrame f;
+    while (nowMs() - startMs < config::kWakeListenMs) {
+      while (CanPort::receive(f)) frames++;
+      delay(2);
+    }
+    CanPort::stop();
+  }
+
+  r.checks++;
+  if (volts < r.checkMinV) r.checkMinV = volts;
+  if (volts > r.checkMaxV) r.checkMaxV = volts;
+  // The check reads higher than the awake device (kWakeCheckOffsetV), so its
+  // levels are raised to match; readings stay raw, so the D report shows the
+  // real gap. The rise rule compares check readings only, so needs no offset.
+  const float off = config::kWakeCheckOffsetV;
+  const WakeConfig wc = {config::kEngineRunningV + off, config::kLowVoltageCutoffV + off,
+                         config::kCutoffRecoverV + off, config::kWakeRiseV, config::kNoSupplyV};
+  const WakeDecision d = decideWake(wc, r.kind, r.lowestV, volts, frames);
+  r.lowestV = d.lowestV;
+  if (d.result == WakeResult::Boot) {
+    wokeFromSleep_ = true;
+    wake_ = r;
+    wokeFor_ = d.reason;
+    wokeAtV_ = volts;
+    if (frames > 0) search_.frame(nowMs());
+    return;
+  }
+  r.kind = d.result == WakeResult::SleepParked ? SleepKind::Parked : SleepKind::Cutoff;
+  DeepSleep::sleepFor(r, checkIntervalS(r.kind));
+}
+
+void App::goToSleep(SleepKind kind) {
+  const SupplyStatus& s = supply_.status();
+  const CentiVolts v = centiVolts(s.volts);
+  if (kind == SleepKind::Parked) {
+    console_.log("Sleep: parked for %lu s at %lu.%02luV - sleeping, checking every %lu s",
+                 static_cast<unsigned long>(config::kSleepAfterParkedS), v.whole, v.hundredths,
+                 static_cast<unsigned long>(checkIntervalS(kind)));
+  } else {
+    const CentiVolts cut = centiVolts(config::kLowVoltageCutoffV);
+    console_.log("Sleep: supply %lu.%02luV below the %lu.%02luV cutoff - sleeping, checking every %lu s", v.whole,
+                 v.hundredths, cut.whole, cut.hundredths, static_cast<unsigned long>(checkIntervalS(kind)));
+  }
+  console_.flush();
+  CanPort::stop();
+  StatusLedPort::write(false);
+  // No rise baseline yet: the first wake check sets it (kNoBaselineV).
+  const SleepRecord r = {kind, kNoBaselineV, s.volts, 99.0f, 0.0f, 0, DeepSleep::sleepCount() + 1};
+  DeepSleep::sleepFor(r, checkIntervalS(kind));
 }
 
 void App::clearStats() {

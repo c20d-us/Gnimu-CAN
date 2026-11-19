@@ -38,7 +38,8 @@ static void testCommands() {
                         {"V\r\n", CommandKind::Version},
                         {"P\n", CommandKind::Protocol},
                         {"L\n", CommandKind::ToggleStatus},
-                        {"R\r", CommandKind::Restart}};
+                        {"R\r", CommandKind::Restart},
+                        {"W\n", CommandKind::ToggleStayAwake}};
   for (const Case& c : cases) {
     const EntryResult r = feedAll(e, c.text);
     assert(r.kind == EntryKind::Command && r.cmd == c.kind);

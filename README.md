@@ -14,10 +14,13 @@
 
 Gnimu-CAN is firmware for a Seeed Studio XIAO ESP32C6 that reads vehicle data from a car's CAN bus and streams it over BLE (Bluetooth Low Energy) at a fixed rate, for telemetry apps to record alongside GNSS and IMU data. It's a companion to [Gnimu](https://github.com/c20d-us/Gnimu), and its first target app is [AutoX Data Logger](https://autoxdrivermod.com), which reads it as a custom BLE sensor.
 
-The first version is vehicle-agnostic: it polls standard OBD-II PIDs (RPM and throttle position to start) over the OBD-II port and works on most cars from 2008 on. Vehicle-specific variants come later. It streams the shared [Gnimu frame](https://github.com/c20d-us/Gnimu-protocol); what it fills and how to set up AutoXDL are in [docs/ble-protocol.md](docs/ble-protocol.md).
+The first version is vehicle-agnostic: it polls standard OBD-II PIDs (RPM and throttle position to start) over the OBD-II port and works on most cars from 2008 on. Vehicle-specific variants will come later. It streams the shared [Gnimu frame](https://github.com/c20d-us/Gnimu-protocol); what it fills and how to set up AutoXDL are in [docs/ble-protocol.md](docs/ble-protocol.md).
 
 > [!NOTE]
-> **Work in progress.** The firmware finds the car's CAN bit rate (or reaches a gatewayed port with a probe), discovers the engine ECU, polls RPM and throttle position, and streams them with the supply voltage in Gnimu frames over BLE. It's bench-tested against a fake ECU and with AutoXDL; the first car test is next. Sleep and the low-voltage cutoff's action come after that. Anything here may change.
+> **Work in progress.** The firmware finds the car's CAN bit rate (or reaches a gatewayed port with a probe), discovers the engine ECU, polls RPM and throttle position, and streams them with the supply voltage in Gnimu frames over BLE. It sleeps when the car is parked or its battery is low, waking on a timer to check if it should resume operation. It has bench-tested against a fake ECU and with AutoXDL; the first car test is pending arrival of a custom PCB that will allow the hardware to be installed into a compact project box with a J1962 OBD-II plug ([docs/car-test.md](docs/car-test.md)). Nothing has been tagged or released, and anything here may change at any time.
+
+> [!WARNING]
+> **This device connects to your car's diagnostic port and transmits on its CAN bus.** It's a personal project, not a product: it hasn't been tested on any car other than the author's, and it comes with no warranty. If you build or use it, you do so entirely at your own risk. Read [Use at your own risk](#use-at-your-own-risk) first.
 
 ## Hardware
 
@@ -71,12 +74,25 @@ code/GnimuCAN/          The firmware sketch
 docs/
   architecture.md       Firmware design
   ble-protocol.md       BLE identity, frame fields and AutoXDL setup
+  car-test.md           Checklist for the first car test
 scripts/                setup.sh, build.sh, flash.sh, and tool.sh for the diagnostic sketches
 tests/                  Host tests for src/core
 tools/                  Standalone diagnostic sketches
 ```
 
-To check a new board and the command-line toolchain, see [tools/](tools/README.md).
+To check a new board and the command-line toolchain, see [tools/](tools/README.md). The plan for the first test in a car is [docs/car-test.md](docs/car-test.md).
+
+## Use at your own risk
+
+Gnimu-CAN is open source, and anyone is welcome to build, use or fork it. That said, it plugs into your car and interacts with the vehicle's electronics. **Make sure you understand what that means before you experiment with it.**
+
+- **It transmits on your car's bus.** It listens first, and it's designed to stay quiet unless it has a reason to speak, but to read data it sends OBD-II requests through the connector, and on a car whose diagnostic port is behind a gateway it sends probe frames to find out whether the car is on. Any device on a car's bus can, in the wrong circumstances, cause warning lights, stored fault codes, modules that wake up or misbehave, or worse.
+- **It draws power from your car's battery.** The OBD-II port is powered even when the car is off. The firmware sleeps when the car is parked, but it isn't designed to look after a battery for weeks. Switch it off or unplug it when you park for long periods.
+- **The hardware is yours to get right.** Wiring mistakes, a short, the wrong termination setting or a poor connection can damage the device, the car's wiring or its electronics. Check your build carefully before plugging it in.
+- **Don't let it distract you while driving.** Set it up, read the console and change settings with the car parked, or with a passenger doing it. Follow your local laws, and the rules of any event or track you take it to.
+- **It's not affiliated with any car maker, and nobody supports it for you.** Vehicle and product names used here are for identification only.
+
+**You are solely responsible for how you use this software and hardware, and for any damage to your vehicle, other property or anyone else that results.** As the [license](LICENSE) states, it's provided "as is", without warranty of any kind, and the author accepts no liability for any loss or damage arising from its use. If you aren't comfortable with that, *do not* connect it to a car.
 
 ## License
 

@@ -43,7 +43,6 @@ uint32_t fillMask(const frame::Field* fields, size_t n) {
 }
 
 // Hundredths, rounded: the console prints integers only.
-unsigned centi(float v) { return static_cast<unsigned>(v * 100.0f + 0.5f); }
 
 }  // namespace
 
@@ -70,7 +69,8 @@ void Diagnostics::handle(const ConsoleCommand& cmd) {
       printProtocol();
       break;
     case CommandKind::Restart:
-      break;  // App acts on it
+    case CommandKind::ToggleStayAwake:
+      break;  // App acts on these
     case CommandKind::ToggleStatus:
       armStatus(statusRemaining_ != 0 ? 0 : config::kStatusMaxCount);
       break;
@@ -105,6 +105,7 @@ DeviceStatus Diagnostics::snapshot(uint64_t nowUs) const {
   s.can = CanPort::status();
   s.canSummary = can_;
   s.obd = obd_;
+  s.sleep = sleep_;
   s.ble.connected = ble_.connected();
   s.ble.stats = ble_.stats();
   s.consoleDropped = console_.dropped();
@@ -135,16 +136,16 @@ size_t Diagnostics::formatVersion(char* buf, size_t cap) const {
   formatBuildLine(line, sizeof(line), buildInfo());
   o.put("%s\n", line);
   o.put("Device ID: %s\n", deviceId_);
-  const unsigned probeV = centi(config::kGatewayProbeMinV);
-  o.put("Config: hardware %s, vehicle obd2, CAN auto 500/250 kbit/s, gateway probe at %u.%02uV\n",
-        board::kHardwareName, probeV / 100, probeV % 100);
+  const CentiVolts probeV = centiVolts(config::kGatewayProbeMinV);
+  o.put("Config: hardware %s, vehicle obd2, CAN auto 500/250 kbit/s, gateway probe at %lu.%02luV\n",
+        board::kHardwareName, probeV.whole, probeV.hundredths);
   o.put("Config: BLE \"%s %s\", Gnimu frame v%u, %u bytes at %lu Hz\n", config::kBleNamePrefix,
         deviceId_, static_cast<unsigned>(frame::kSpecVersion), static_cast<unsigned>(frame::kFrameBytes),
         static_cast<unsigned long>(config::kEmitRateHz));
   const unsigned cal = static_cast<unsigned>(config::kSupplyCalibration * 1000.0f + 0.5f);
-  const unsigned run = centi(config::kEngineRunningV), cutoff = centi(config::kLowVoltageCutoffV);
-  o.put("Config: supply calibration %u.%03u, engine running %u.%02uV, cutoff %u.%02uV\n", cal / 1000,
-        cal % 1000, run / 100, run % 100, cutoff / 100, cutoff % 100);
+  const CentiVolts run = centiVolts(config::kEngineRunningV), cutoff = centiVolts(config::kLowVoltageCutoffV);
+  o.put("Config: supply calibration %u.%03u, engine running %lu.%02luV, cutoff %lu.%02luV\n", cal / 1000,
+        cal % 1000, run.whole, run.hundredths, cutoff.whole, cutoff.hundredths);
   return o.len;
 }
 
@@ -205,9 +206,9 @@ size_t Diagnostics::formatSchema(char* buf, size_t cap) const {
 size_t Diagnostics::formatDeviceInfo(char* buf, size_t cap) const {
   char emit[12], run[12], cutoff[12], cal[12];
   snprintf(emit, sizeof(emit), "%lu", static_cast<unsigned long>(config::kEmitRateHz));
-  const unsigned r = centi(config::kEngineRunningV), c = centi(config::kLowVoltageCutoffV);
-  snprintf(run, sizeof(run), "%u.%02u", r / 100, r % 100);
-  snprintf(cutoff, sizeof(cutoff), "%u.%02u", c / 100, c % 100);
+  const CentiVolts r = centiVolts(config::kEngineRunningV), c = centiVolts(config::kLowVoltageCutoffV);
+  snprintf(run, sizeof(run), "%lu.%02lu", r.whole, r.hundredths);
+  snprintf(cutoff, sizeof(cutoff), "%lu.%02lu", c.whole, c.hundredths);
   const unsigned k = static_cast<unsigned>(config::kSupplyCalibration * 1000.0f + 0.5f);
   snprintf(cal, sizeof(cal), "%u.%03u", k / 1000, k % 1000);
   const CfgItem cfg[] = {

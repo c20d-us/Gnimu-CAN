@@ -9,6 +9,19 @@
 #include <string.h>
 
 namespace gnimu {
+
+// Volts as whole volts and hundredths, rounded, for "%lu.%02lu": the console
+// prints integers only (no float format, see Report.h). Below 0 reads 0.
+struct CentiVolts {
+  unsigned long whole;
+  unsigned long hundredths;
+};
+
+inline CentiVolts centiVolts(float v) {
+  const unsigned long c = v <= 0.0f ? 0UL : static_cast<unsigned long>(v * 100.0f + 0.5f);
+  return {c / 100, c % 100};
+}
+
 namespace detail {
 
 // Digit count of `v` in base 10 (at least 1, for 0 itself).

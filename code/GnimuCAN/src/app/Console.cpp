@@ -60,7 +60,14 @@ void Console::printStatus(const DeviceStatus& status, const StatusRates& rates) 
 }
 
 void Console::flush() {
+  // The port's transmit timeout is 0 so that output never blocks, and flush()
+  // waits only that long: it returned at once and left the last, partial USB
+  // packet unsent (a sleep line cut off at exactly 64 bytes, on the bench).
+  // This runs only just before a restart or sleep, so a short wait is fine,
+  // and with no host reading it gives up after the timeout.
+  Serial.setTxTimeoutMs(100);
   Serial.flush();
+  Serial.setTxTimeoutMs(0);
   // flush() hands the bytes to USB/UART; the short wait lets them actually
   // leave before a reset cuts the link.
   delay(50);

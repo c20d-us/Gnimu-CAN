@@ -33,8 +33,8 @@ inline size_t formatStatus(char *buf, size_t cap, const DeviceStatus &d, const S
   const unsigned long uptimeS = static_cast<unsigned long>(d.uptimeUs / 1000000ULL);
   o.put("RT: %lus | %s | ", uptimeS, stateName(d.state));
   if (d.supply.valid) {
-    const unsigned long centiV = static_cast<unsigned long>(d.supply.volts * 100.0f + 0.5f);
-    o.put("Supply: %lu.%02luV %s | ", centiV / 100, centiV % 100, supplyLevelName(d.supply.level));
+    const CentiVolts v = centiVolts(d.supply.volts);
+    o.put("Supply: %lu.%02luV %s | ", v.whole, v.hundredths, supplyLevelName(d.supply.level));
   } else {
     o.put("Supply: - | ");
   }

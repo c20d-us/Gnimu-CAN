@@ -10,6 +10,7 @@
 #include <math.h>
 #include <stdio.h>
 
+#include "../code/GnimuCAN/src/core/DiscoveryBackoff.h"
 #include "../code/GnimuCAN/src/core/ObdPoller.h"
 #include "../code/GnimuCAN/src/core/VehicleActivity.h"
 
@@ -145,7 +146,20 @@ static void testActivity() {
   assert(vehicleActivity(false, 0, 400, SupplyLevel::Unknown) == VehicleActivity::Unknown);
 }
 
+// Discovery on a bus nobody answers: 5 s, then 30 s, then 2 minutes.
+static void testDiscoveryBackoff() {
+  const DiscoveryBackoff b = {5000, 30000, 120000, 3};
+  assert(discoveryRetryMs(b, 1) == 5000 && discoveryRetryMs(b, 3) == 5000);
+  assert(discoveryRetryMs(b, 4) == 30000 && discoveryRetryMs(b, 6) == 30000);
+  assert(discoveryRetryMs(b, 7) == 120000 && discoveryRetryMs(b, 1000000) == 120000);
+  // An hour of a bus that never answers: under 40 requests, not 720.
+  uint32_t t = 0, n = 0;
+  while (t < 3600000) t += discoveryRetryMs(b, ++n);
+  assert(n < 40);
+}
+
 int main() {
+  testDiscoveryBackoff();
   testSupportBitmap();
   testOneInFlight();
   testTimeout();

@@ -84,10 +84,25 @@ constexpr uint32_t kObdReplyTimeoutMs = 50;
 constexpr uint32_t kVehicleLostMs = 2000;
 // A channel's value goes into the frame only while it's at most this old.
 constexpr uint32_t kChannelStaleMs = 1000;
-// With traffic on the bus but no ECU answering, how long before asking again,
-// and how many unanswered tries before going back to checking the bit rate.
+// With traffic on the bus but no ECU answering, how long before asking again:
+// every 5 s for 3 tries, every 30 s for the next 3, then every 2 minutes
+// (core/DiscoveryBackoff.h). Starts over when the bus goes quiet.
 constexpr uint32_t kDiscoveryRetryMs = 5000;
-constexpr uint8_t kDiscoveryMaxTries = 3;
+constexpr uint32_t kDiscoveryBackoffMs = 30000;
+constexpr uint32_t kDiscoveryMaxBackoffMs = 120000;
+constexpr uint8_t kDiscoveryTriesPerStep = 3;
+
+// Sleep
+
+// No CAN frame for this long counts as a silent bus, one of the parked
+// conditions.
+constexpr uint32_t kBusSilentMs = 10000;
+// A wake check: supply readings averaged, then a listen at each bit rate.
+constexpr uint32_t kWakeSupplySamples = 32;
+constexpr uint32_t kWakeListenMs = 150;
+// Below this the regulator can't run the XIAO, so the device must be on USB
+// with no 12 V connected: it never sleeps then (no battery to protect).
+constexpr float kNoSupplyV = 6.0f;
 
 // Supply voltage
 
@@ -124,7 +139,23 @@ static_assert(kGatewayProbeBitrate == 500000 || kGatewayProbeBitrate == 250000,
 static_assert(kRpmPeriodMs >= 10 && kThrottlePeriodMs >= 10, "poll periods must be at least 10 ms");
 static_assert(kChannelStaleMs > kRpmPeriodMs && kChannelStaleMs > kThrottlePeriodMs,
               "a channel must stay fresh for longer than its poll period");
+static_assert(kDiscoveryRetryMs <= kDiscoveryBackoffMs && kDiscoveryBackoffMs <= kDiscoveryMaxBackoffMs,
+              "discovery backoff must not get shorter");
+static_assert(kDiscoveryTriesPerStep >= 1, "at least one discovery try per backoff step");
 static_assert(kVehicleLostMs > kObdReplyTimeoutMs * 4, "vehicle-lost window too short to be meaningful");
+static_assert(kSleepAfterParkedS >= 60, "sleeping less than a minute after parking would sleep at traffic lights");
+static_assert(kParkedCheckIntervalS >= 5 && kParkedCheckIntervalS <= 300,
+              "parked check interval must be 5-300 s: shorter wastes power, longer misses starts");
+static_assert(kCutoffCheckIntervalS >= kParkedCheckIntervalS, "the cutoff checks no more often than parked");
+static_assert(kCutoffRecoverV > kLowVoltageCutoffV && kCutoffRecoverV < kEngineRunningV,
+              "cutoff recovery must sit between the cutoff and engine running");
+static_assert(kWakeCheckOffsetV >= 0.0f && kWakeCheckOffsetV <= 0.5f,
+              "the wake-check offset should be 0-0.5 V; more means the reading itself needs fixing");
+static_assert(kWakeRiseV >= 0.1f && kWakeRiseV <= 1.0f, "wake rise must be 0.1-1.0 V: below 0.1 is ADC noise");
+static_assert(kBusSilentMs >= kVehicleLostMs, "the bus must be silent longer than the vehicle-lost window");
+static_assert(kNoSupplyV > 1.0f && kNoSupplyV < kLowVoltageCutoffV - 2.0f,
+              "the no-supply level must sit well below the cutoff and above ADC noise at 0 V");
+static_assert(kWakeListenMs >= 50, "a wake listen shorter than 50 ms can miss slow traffic");
 static_assert(kSupplyEmaAlpha > 0.0f && kSupplyEmaAlpha <= 1.0f, "alpha must be in (0, 1]");
 static_assert(kStatusPeriodUs > 0, "status period must be positive");
 static_assert(kLedPeriodUs / 1000 <= kLedFaultHalfMs,

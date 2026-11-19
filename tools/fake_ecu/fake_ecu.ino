@@ -23,7 +23,8 @@
 // sends a frame on 0x100 every 10 ms, the kind of chatter an ungatewayed bus
 // carries, so Gnimu-CAN's listen-only rate check has something to hear. In
 // "gateway" mode it stays silent until asked, like an OBD port behind a
-// gateway.
+// gateway. If its controller goes bus-off, it restarts it by itself, as a
+// real ECU would, and says so.
 //
 // Console commands (end with Enter):
 //   GATEWAY       silent until asked (Gnimu-CAN must use its gateway probe)
@@ -31,6 +32,11 @@
 //   RATE 500      or RATE 250: the bus bit rate, kbit/s
 //   DELAY n       wait n ms (0-100) before each reply
 //   OFF / ON      stop answering entirely (the car switched off), or resume
+//   HIDE / SHOW   leave RPM (0C) and throttle (11) out of the supported list
+//                 and don't answer them (an ECU with nothing Gnimu-CAN polls),
+//                 or put them back
+//   MUTE / UNMUTE keep the chatter going but ignore every request (a bus with
+//                 traffic where no ECU answers OBD), or answer again
 //   S             print the status line now
 //
 // Target: Seeed XIAO ESP32C6, serial console at 115200. Leave the CAN Pal's
@@ -64,12 +70,15 @@ constexpr uint32_t kStatusPeriodMs = 1000;
 uint32_t bitrate = 500000;
 bool gatewayMode = false;
 bool answering = true;
+bool hidePolled = false;  // HIDE: no RPM or throttle
+bool muted = false;       // MUTE: chatter, but no replies
 uint32_t replyDelayMs = 2;
 
 uint32_t requests = 0;
 uint32_t replies = 0;
 uint32_t unsupported = 0;
 uint32_t chatterSent = 0;
+uint32_t busOffRecoveries = 0;
 uint32_t ledOffAtMs = 0;
 String line;
 
@@ -103,12 +112,13 @@ float throttleNow(uint32_t ms) { return (ms % 5000) / 50.0f; }  // 0..100 % ever
 
 // Mode 01 data bytes (A, B, ...) for `pid`, or 0 if unsupported.
 uint8_t pidData(uint8_t pid, uint32_t ms, uint8_t (&d)[4]) {
+  if (hidePolled && (pid == 0x0C || pid == 0x11)) return 0;
   switch (pid) {
     case 0x00:  // supported 01-20: 05, 0C, 0D, 0F, 11 and 20
       // Bit 7 of A is PID 01, bit 0 of D is PID 20.
       d[0] = 0x08;  // 05
-      d[1] = 0x1A;  // 0C, 0D, 0F
-      d[2] = 0x80;  // 11
+      d[1] = hidePolled ? 0x0A : 0x1A;  // 0C (unless hidden), 0D, 0F
+      d[2] = hidePolled ? 0x00 : 0x80;  // 11 (unless hidden)
       d[3] = 0x01;  // 20: more support data follows
       return 4;
     case 0x20:  // supported 21-40: none here, 41-60 next
@@ -175,7 +185,7 @@ void handleFrame(const twai_message_t& m) {
   if (m.extd || (m.identifier != kFunctionalId && m.identifier != kPhysicalId)) return;
   if (m.data_length_code < 3 || m.data[0] != 0x02 || m.data[1] != 0x01) return;
   requests++;
-  if (answering) reply(m.data[2]);
+  if (answering && !muted) reply(m.data[2]);
 }
 
 void sendChatter() {
@@ -190,11 +200,11 @@ void sendChatter() {
 void printStatus() {
   twai_status_info_t s = {};
   twai_get_status_info(&s);
-  Serial.printf("up %lus | %s, %lu kbit/s, %s, delay %lu ms | requests %lu, replies %lu, unsupported %lu, chatter %lu | "
-                "TEC %lu REC %lu%s\n",
+  Serial.printf("up %lus | %s, %lu kbit/s, %s%s%s, delay %lu ms | requests %lu, replies %lu, unsupported %lu, chatter %lu | "
+                "TEC %lu REC %lu%s, bus-off recoveries %lu\n",
                 millis() / 1000, gatewayMode ? "gateway" : "broadcast", bitrate / 1000, answering ? "answering" : "OFF",
-                replyDelayMs, requests, replies, unsupported, chatterSent, s.tx_error_counter, s.rx_error_counter,
-                s.state == TWAI_STATE_BUS_OFF ? " BUS OFF" : "");
+                muted ? ", MUTED" : "", hidePolled ? ", RPM+throttle HIDDEN" : "", replyDelayMs, requests, replies, unsupported, chatterSent, s.tx_error_counter, s.rx_error_counter,
+                s.state == TWAI_STATE_BUS_OFF ? " BUS OFF" : "", busOffRecoveries);
 }
 
 void handleLine(String cmd) {
@@ -208,6 +218,14 @@ void handleLine(String cmd) {
     answering = false;
   } else if (cmd == "ON") {
     answering = true;
+  } else if (cmd == "HIDE") {
+    hidePolled = true;
+  } else if (cmd == "SHOW") {
+    hidePolled = false;
+  } else if (cmd == "MUTE") {
+    muted = true;
+  } else if (cmd == "UNMUTE") {
+    muted = false;
   } else if (cmd == "RATE 500" || cmd == "RATE 250") {
     bitrate = cmd.endsWith("500") ? 500000 : 250000;
     Serial.printf("CAN: %s\n", startCan() ? "restarted" : "failed to restart");
@@ -215,7 +233,7 @@ void handleLine(String cmd) {
     const long v = cmd.substring(6).toInt();
     if (v >= 0 && v <= 100) replyDelayMs = static_cast<uint32_t>(v);
   } else if (cmd != "S") {
-    Serial.printf("Unknown '%s': GATEWAY, BROADCAST, RATE 500|250, DELAY n, OFF, ON, S\n", cmd.c_str());
+    Serial.printf("Unknown '%s': GATEWAY, BROADCAST, RATE 500|250, DELAY n, OFF, ON, HIDE, SHOW, MUTE, UNMUTE, S\n", cmd.c_str());
     return;
   }
   printStatus();
@@ -240,7 +258,7 @@ void setup() {
   Serial.println();
   Serial.println("Gnimu-CAN fake ECU");
   Serial.printf("CAN: %s at %lu kbit/s\n", startCan() ? "started" : "FAILED", bitrate / 1000);
-  Serial.println("Commands: GATEWAY, BROADCAST, RATE 500|250, DELAY n, OFF, ON, S");
+  Serial.println("Commands: GATEWAY, BROADCAST, RATE 500|250, DELAY n, OFF, ON, HIDE, SHOW, MUTE, UNMUTE, S");
   printStatus();
 }
 
@@ -248,6 +266,21 @@ void loop() {
   static uint32_t lastChatter = 0;
   static uint32_t lastStatus = 0;
   const uint32_t now = millis();
+
+  // Bus-off: the controller has switched itself off after too many failed
+  // transmissions (on the bench, when RATE changes while Gnimu-CAN is still
+  // active at the old rate and error-frames everything sent). A real ECU
+  // recovers, so this does too: restart the controller once a second.
+  static uint32_t lastBusOffCheck = 0;
+  if (now - lastBusOffCheck >= 1000) {
+    lastBusOffCheck = now;
+    twai_status_info_t st = {};
+    if (twai_get_status_info(&st) == ESP_OK && st.state == TWAI_STATE_BUS_OFF) {
+      busOffRecoveries++;
+      Serial.printf("CAN: bus-off - restarting the controller (%lu so far): %s\n", busOffRecoveries,
+                    startCan() ? "ok" : "FAILED");
+    }
+  }
 
   twai_message_t m;
   while (twai_receive(&m, 0) == ESP_OK) handleFrame(m);

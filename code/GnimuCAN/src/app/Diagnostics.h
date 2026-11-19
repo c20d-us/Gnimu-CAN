@@ -27,8 +27,8 @@ class Diagnostics {
   // Everything is referenced, not copied, and must outlive this object.
   Diagnostics(Console& console, const Job* jobs, const JobStats* stats, size_t jobCount,
               const uint32_t& loops, const RunStateMachine& machine, const SupplyMonitor& supply,
-              const CanSummary& can, const ObdSummary& obd, const BlePeripheral& ble, const char* deviceId,
-              const ResetRecord& reset)
+              const CanSummary& can, const ObdSummary& obd, const SleepView& sleep, const BlePeripheral& ble,
+              const char* deviceId, const ResetRecord& reset)
       : console_(console),
         jobs_(jobs),
         stats_(stats),
@@ -38,6 +38,7 @@ class Diagnostics {
         supply_(supply),
         can_(can),
         obd_(obd),
+        sleep_(sleep),
         ble_(ble),
         deviceId_(deviceId),
         reset_(reset) {}
@@ -78,6 +79,7 @@ class Diagnostics {
   const SupplyMonitor& supply_;
   const CanSummary& can_;
   const ObdSummary& obd_;
+  const SleepView& sleep_;
   const BlePeripheral& ble_;
   const char* deviceId_;
   const ResetRecord& reset_;

@@ -44,11 +44,32 @@ constexpr size_t kMaxObdChannels = 4;
 // What OBD polling has found, kept by App.
 struct ObdSummary {
   bool ecuFound;
+  bool nothingToPoll;   // an ECU answered, but supports none of the polled PIDs
   uint32_t responseId;  // the ECU's reply ID, 0x7E8 for the engine ECU
   uint32_t requestId;   // its physical request ID
   uint8_t channelCount;
   ObdChannelView channels[kMaxObdChannels];
   VehicleActivity activity;
+};
+
+// Where sleep stands, kept by App (docs/architecture.md, Sleep and the cutoff).
+struct SleepView {
+  bool stayAwake;         // the console's W: never sleep this boot
+  bool noSupply;          // no 12 V: on USB, never sleeps
+  float noSupplyV;        // ... below this
+  bool parked;            // the parked conditions hold now
+  uint32_t parkedForMs;   // ... for this long
+  uint32_t sleepAfterMs;  // parked this long: sleep
+  uint32_t sleepCount;    // times slept since power-up
+  // The wake that started this boot, if one did.
+  bool woke;
+  const char* wokeFor;   // the reason, as text
+  const char* asleepFor; // parked or below cutoff
+  uint32_t checks;       // wake checks before it
+  float sleptAtV;        // the awake reading when it went to sleep
+  float checkMinV;       // the range the wake checks read
+  float checkMaxV;
+  float wokeAtV;         // the reading it woke on
 };
 
 // The device's state at one moment, as the D report and the status line show
@@ -65,6 +86,7 @@ struct DeviceStatus {
   CanStatus can;
   CanSummary canSummary;
   ObdSummary obd;
+  SleepView sleep;
   struct Ble {
     bool connected;
     BleStats stats;
