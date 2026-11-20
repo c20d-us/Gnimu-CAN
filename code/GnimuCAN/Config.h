@@ -24,7 +24,7 @@ constexpr uint32_t kEmitRateHz = 20;
 // Device Information model string and the schema's product name.
 constexpr char kBleNamePrefix[] = "Gnimu-CAN";
 // Device Information manufacturer string.
-constexpr char kBleManufacturer[] = "Gnimu";
+constexpr char kBleManufacturer[] = "Gnimu Labs";
 
 // Supply voltage
 

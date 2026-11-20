@@ -22,7 +22,7 @@ It also provides the standard Device Information Service (`0x180A`):
 
 | Characteristic | Value |
 |---|---|
-| Manufacturer Name | `Gnimu` |
+| Manufacturer Name | `Gnimu Labs` |
 | Model Number | `Gnimu-CAN` |
 | Serial Number | The 10-digit device ID |
 | Firmware Revision | The firmware version, such as `0.1.0` |
