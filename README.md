@@ -97,3 +97,5 @@ Gnimu-CAN is open source, and anyone is welcome to build, use or fork it. That s
 ## License
 
 GPL-3.0. See [LICENSE](LICENSE).
+
+The Gnimu and Gnimu Labs names and logos are not covered by this license. See the [Gnimu Labs branding usage policy](https://github.com/c20d-us/Gnimu-branding/blob/main/LICENSE.md).
