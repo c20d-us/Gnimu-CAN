@@ -17,8 +17,9 @@ namespace gnimu {
 
 void SupplyAdc::begin() { analogReadResolution(12); }
 
-// Factory-calibrated millivolts. Measured on the bench at about 1% low against
-// a meter; Config.h's kSupplyCalibration corrects for that.
+// Factory-calibrated millivolts at the pin. With the divider, the supply
+// reads a few percent off a meter, varying by board; Config.h's
+// kSupplyCalibration corrects for that.
 uint32_t SupplyAdc::readPinMv() { return analogReadMilliVolts(board::kSupplySensePin); }
 
 }  // namespace gnimu

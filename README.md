@@ -33,6 +33,8 @@ The firmware targets the Gnimu-CAN carrier boards in [Gnimu-PCB](https://github.
 | D9 | 20 | `CAN_TX` |
 | D10 | 18 | `CAN_RX` |
 
+To build the 12V carrier and OBD-II helper into a finished unit in a project box, see [Assembling the 12V device](docs/assembly.md).
+
 > [!NOTE]
 > The firmware design is in [docs/architecture.md](docs/architecture.md).
 
@@ -73,8 +75,10 @@ code/GnimuCAN/          The firmware sketch
     app/                The job table, states, boot log, console and diagnostics
 docs/
   architecture.md       Firmware design
+  assembly.md           Building the 12V device into its project box
   ble-protocol.md       BLE identity, frame fields and AutoXDL setup
   car-test.md           Checklist for the first car test
+images/assembly/        Assembly photos (full size and thumbs/)
 scripts/                setup.sh, build.sh, flash.sh, and tool.sh for the diagnostic sketches
 tests/                  Host tests for src/core
 tools/                  Standalone diagnostic sketches

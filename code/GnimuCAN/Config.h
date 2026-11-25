@@ -28,11 +28,13 @@ constexpr char kBleManufacturer[] = "Gnimu Labs";
 
 // Supply voltage
 
-// The ADC reads slightly off; this corrects it. Measure the supply with a
-// meter or a bench supply's display, read the Supply value from the D report,
-// and set this to true / reported. 1.0 = no correction. The first bench board
-// read about 1% low.
-constexpr float kSupplyCalibration = 1.01f;
+// The ADC and the divider read slightly off; this corrects it. Measure the
+// supply with a meter at the board's 12V input, read the Supply value from
+// the D report, and multiply this by meter / reported. 1.0 = no correction.
+// The breadboard read about 1% low; the first 12V carrier v1.0 board about
+// 2.8% low before correction (a best fit to 12.1, 12.7 and 14.3V metered,
+// within 0.04V at each).
+constexpr float kSupplyCalibration = 1.028f;
 // At or above: the alternator is charging, so the engine is running.
 constexpr float kEngineRunningV = 13.2f;
 // Below: protect the car's battery.
