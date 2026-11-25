@@ -47,7 +47,7 @@ Holes for the carrier's four corner standoffs need to be drilled in the bottom o
     </td>
     <td valign="top">
         The OBD-II plug sits in one end of the box, with the helper board inside and the plug's mating face outside. Use the box end <b>without</b> the lid removal cutouts. Cut that end wall away from the top edge down, wide enough for the plug's body to drop in. Use the plug itself to mark the edges, and take the plastic off a little at a time, checking the fit as you go. The top edge of the plug flange should end up flush with the top edge of the box.<br><br>
-        Notch the lid's flange to match, so the lid closes down over the plug and holds it in place.
+        Notch the lid's flange to match, so the lid closes down over the plug and holds it in place. If you'd like the plug to be extra secure, you can glue the J1962 plug to the end wall. I've found this generally unnecessary as the plug holds well once the lid is on.
     </td>
   </tr>
 </table>
