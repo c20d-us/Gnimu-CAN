@@ -25,7 +25,7 @@ This page walks through fitting a loaded [Gnimu-CAN 12V carrier](https://github.
     </td>
     <td align="center" valign="top" width="50%">
       <a href="../images/assembly/01-loaded-pcbs.jpeg"><img src="../images/assembly/thumbs/01-loaded-pcbs.jpeg" alt="The loaded carrier on standoffs with its CAN and 12V pigtails, beside the OBD-II helper on its J1962 plug" width="340"></a><br>
-      <sub>The loaded carrier on its standoffs, with the CAN and 12V pigtails,<br>beside the OBD-II helper on its plug. The switch leads (J3)<br>exit on the underside of the board.</sub>
+      <sub>The loaded carrier on its standoffs, with the CAN and 12V pigtails, beside the OBD-II helper on its plug. The switch leads (J3) exit on the underside of the board.</sub>
     </td>
   </tr>
 </table>
