@@ -3,9 +3,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // Finding the bus while waiting for a vehicle: listen windows, silence for
-// gateway probes, confirmed traffic, discovery backoff, nothing to poll, and
-// starting over when the bus goes quiet. Several of these cases were found on
-// the bench before this logic had tests.
+// gateway probes, confirmed traffic, and starting over when the bus goes
+// quiet. Several of these cases were found on the bench before this logic had
+// tests. Discovery has its own tests (test_obddiscovery.cpp).
 
 #include <assert.h>
 #include <stdio.h>
@@ -14,7 +14,7 @@
 
 using namespace gnimu;
 
-static const BusSearchConfig kConfig = {2000, 10000, {5000, 30000, 120000, 3}};
+static const BusSearchConfig kConfig = {2000, 10000};
 static const uint32_t k500 = 500000, k250 = 250000;
 
 // Runs next() every 10 ms from `from` to `to` (bus clean, no probe wanted),
@@ -32,42 +32,49 @@ static BusAction runUntil(BusSearch& s, uint32_t from, uint32_t to, bool probeDu
   return BusAction::None;
 }
 
-static void testGatewayedBoot() {
-  // Silent at both rates in the boot listen: a probe may go straight away.
-  BusSearch s(kConfig);
-  s.bootListen(k500, 0, true, 300);
-  assert(!s.probeSilence());
-  s.bootListen(k250, 0, true, 600);
+// Listens at 500 then 250 from `at`, a whole silent window at each.
+static void silentAtBoth(BusSearch& s, uint32_t at) {
+  s.listen(k500, at);
+  assert(s.next(at + 2000, true, false) == BusAction::NextWindow);
+  s.listen(k250, at + 2000);
+  assert(!s.probeSilence());  // only 500 so far
+  assert(s.next(at + 4000, true, false) == BusAction::NextWindow);
   assert(s.probeSilence());
-  s.listen(k500, 600);
-  assert(s.next(3000, true, true) == BusAction::Probe);
-  // The probe answered: traffic at 500, found by probe, not by listening.
-  assert(!s.confirmed(k500, false, 3100));
-  assert(s.next(3100, true, false) == BusAction::Discover);
-  assert(!s.heardByListening());
+  s.listen(k500, at + 4000);
 }
 
-static void testHeardByListeningMeansNoProbes() {
+static void testGatewayedBoot() {
+  // Silent at both rates: a probe may go.
   BusSearch s(kConfig);
-  s.bootListen(k500, 12, true, 300);
-  assert(s.confirmed(k500, true, 300));   // first time heard by listening
-  assert(!s.confirmed(k500, true, 400));  // ... only once
-  // The car switches off: quiet, then silence at both rates for a long time.
-  s.ecuFound(true);
-  s.vehicleLost();
-  s.listen(s.rate(), 1000);
-  assert(runUntil(s, 1000, 60000) == BusAction::None);
-  assert(!s.probeSilence());  // never, this boot
+  silentAtBoth(s, 0);
+  assert(s.next(4010, true, true) == BusAction::Probe);
+  // The probe answered: traffic at 500, found by probe, not by listening.
+  s.confirmed(k500);
+  assert(s.next(3100, true, false) == BusAction::None);  // the vehicle source takes over
+  assert(s.trafficRate() == k500);
+}
+
+// Found on the first car test: a port heard earlier that falls silent at both
+// rates gets probes.
+static void testHeardThenSilentAllowsProbes() {
+  BusSearch s(kConfig);
+  s.listen(k500, 0);
+  s.frame(5);
+  assert(s.next(10, true, false) == BusAction::Confirm);
+  s.confirmed(k500);
+  s.vehicleLost();  // polled for a while, then the replies stopped
+  s.listen(k500, 1000);
+  assert(runUntil(s, 1000, 5000) == BusAction::None);  // a whole window at each rate
+  assert(s.probeSilence());
+  assert(runUntil(s, 5010, 5010, true) == BusAction::Probe);
 }
 
 // Found on the bench: losing the vehicle at 500 with the bus now at 250 sent
 // a probe at 500 onto the live 250 bus within 20 ms.
 static void testLiveBusAtOtherRateIsFoundBeforeAnyProbe() {
   BusSearch s(kConfig);
-  s.bootListen(k500, 0, true, 300);
-  s.bootListen(k250, 0, true, 600);
-  s.confirmed(k500, false, 3000);  // a gatewayed car, found by probe
-  s.ecuFound(true);
+  silentAtBoth(s, 0);
+  s.confirmed(k500);  // a gatewayed car, found by probe
   // Polling at 500; the bus moves to 250 and the vehicle is lost.
   s.frame(5000);
   s.vehicleLost();
@@ -79,6 +86,30 @@ static void testLiveBusAtOtherRateIsFoundBeforeAnyProbe() {
   s.listen(k250, 9000);
   s.frame(9050);
   assert(s.next(9060, true, s.probeSilence()) == BusAction::Confirm);
+}
+
+// A 250 kbit/s car: bus errors at 500 move the search to 250 well before the
+// window is up, and its first clean frame there confirms it.
+static void testErrorsSwitchRatesEarly() {
+  BusSearch s(kConfig);
+  s.listen(k500, 0);
+  assert(s.next(100, false, false) == BusAction::None);  // not on the first error
+  assert(s.next(200, false, false) == BusAction::NextWindow);
+  s.listen(k250, 200);
+  s.frame(203);
+  assert(s.next(210, true, false) == BusAction::Confirm);
+}
+
+// No 12V: CAN off, and back to nothing found.
+static void testRestartForgetsTheBus() {
+  BusSearch s(kConfig);
+  s.listen(k500, 0);
+  s.frame(5);
+  s.confirmed(k500);
+  s.restart();
+  assert(s.trafficRate() == 0 && !s.probeSilence());
+  s.listen(k500, 100);
+  assert(s.next(110, true, false) == BusAction::None);  // no frame in this window yet
 }
 
 static void testBusErrorsAreNotSilence() {
@@ -94,47 +125,25 @@ static void testBusErrorsAreNotSilence() {
   assert(s.probeSilence());
 }
 
-static void testDiscoveryBackoff() {
+// Traffic confirmed: the bus search has nothing to do until the bus goes
+// quiet, however long that takes (the vehicle source asks for ECUs meanwhile).
+static void testConfirmedTrafficWaitsForQuiet() {
   BusSearch s(kConfig);
-  s.confirmed(k500, true, 1000);
-  uint32_t t = 1000;
-  const uint32_t waits[] = {5000, 5000, 5000, 30000, 30000, 30000, 120000, 120000};
-  for (uint32_t w : waits) {
-    assert(s.next(t, true, false) == BusAction::Discover);
-    s.frame(t);  // the bus keeps chattering
-    assert(s.discoveryFailed(t) == w);
-    s.frame(t + w - 1);
-    assert(s.next(t + w - 1, true, false) == BusAction::None);
-    t += w;
-    s.frame(t);
-  }
-  assert(s.failures() == 8);
-  // A car switching on (traffic again after quiet) starts from 5 s.
-  s.quiet();
-  s.confirmed(k500, true, t + 100);
-  assert(s.discoveryFailed(t + 100) == 5000);
-}
-
-static void testNothingToPoll() {
-  BusSearch s(kConfig);
-  s.confirmed(k500, true, 0);
-  s.ecuFound(false);
-  assert(s.nothingToPoll());
-  // Traffic continues: never asks again...
+  s.confirmed(k500);
   for (uint32_t t = 10; t < 600000; t += 1000) {
     s.frame(t);
     assert(s.next(t, true, false) == BusAction::None);
   }
-  // ... until the bus goes quiet, which starts over.
-  assert(s.next(600000 + 10000, true, false) == BusAction::Quiet);
+  assert(s.next(599010 + 10000, true, false) == BusAction::Quiet);
   s.quiet();
-  assert(!s.nothingToPoll() && s.trafficRate() == 0);
+  assert(s.trafficRate() == 0);
 }
 
 static void testQuietStartsOver() {
   BusSearch s(kConfig);
-  s.bootListen(k250, 5, true, 300);
-  s.confirmed(k250, false, 300);  // say, found by probe: probes stay allowed
+  s.listen(k250, 0);
+  s.frame(300);
+  s.confirmed(k250);
   s.frame(1000);
   assert(s.next(10999, true, false) != BusAction::Quiet);
   assert(s.next(11000, true, false) == BusAction::Quiet);
@@ -149,11 +158,12 @@ static void testQuietStartsOver() {
 
 int main() {
   testGatewayedBoot();
-  testHeardByListeningMeansNoProbes();
+  testHeardThenSilentAllowsProbes();
   testLiveBusAtOtherRateIsFoundBeforeAnyProbe();
+  testErrorsSwitchRatesEarly();
+  testRestartForgetsTheBus();
   testBusErrorsAreNotSilence();
-  testDiscoveryBackoff();
-  testNothingToPoll();
+  testConfirmedTrafficWaitsForQuiet();
   testQuietStartsOver();
   printf("test_bussearch: ok\n");
   return 0;

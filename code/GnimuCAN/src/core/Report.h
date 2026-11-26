@@ -11,6 +11,7 @@
 
 #include "BleStats.h"
 #include "DeviceStatus.h"
+#include "Obd2.h"
 #include "ResetReason.h"
 #include "Scheduler.h"
 #include "TextOut.h"
@@ -28,7 +29,7 @@ struct JobTable {
 // The console's D-report buffer. test_report checks that the worst case
 // (every counter at 10 digits) fits, so a report that grows fails a test
 // rather than losing its last lines on the device.
-constexpr size_t kReportMaxBytes = 2048;
+constexpr size_t kReportMaxBytes = 2560;
 
 // Text of the on-request diagnostics report, formatted into a caller buffer so
 // it can be tested on a host. Output is truncated, never overrun.
@@ -138,7 +139,7 @@ inline size_t formatReport(char *buf, size_t cap, const JobTable &t, const Devic
           static_cast<unsigned long>(d.can.busErrors), static_cast<unsigned long>(d.can.rxMissed),
           d.can.busOff ? ", BUS OFF" : "");
   } else {
-    o.put("CAN: stopped\n");
+    o.put(d.canSummary.noSupply ? "CAN: off - no 12V supply (USB alone)\n" : "CAN: stopped\n");
   }
   if (d.canSummary.trafficBitrate) {
     o.put("CAN: traffic at %lu kbit/s, %lu frames\n", static_cast<unsigned long>(d.canSummary.trafficBitrate / 1000),
@@ -146,14 +147,15 @@ inline size_t formatReport(char *buf, size_t cap, const JobTable &t, const Devic
   } else {
     o.put("CAN: no traffic heard, %lu frames\n", static_cast<unsigned long>(d.canSummary.framesSeen));
   }
-  o.put("CAN: gateway probes %u of %u, last: %s\n", static_cast<unsigned>(d.canSummary.probes),
-        static_cast<unsigned>(d.canSummary.maxProbes), probeResultText(d.canSummary.lastProbe));
+  o.put("CAN: gateway probes %lu, last: %s\n", static_cast<unsigned long>(d.canSummary.probes),
+        probeResultText(d.canSummary.lastProbe));
+  char ids[obd2::kResponseIdsTextMax];
+  obd2::formatResponseIds(ids, sizeof(ids), d.obd.answeredEcus);
   if (d.obd.ecuFound) {
-    o.put("OBD: ECU 0x%03lX, requests to 0x%03lX\n", static_cast<unsigned long>(d.obd.responseId),
-          static_cast<unsigned long>(d.obd.requestId));
+    o.put("OBD: ECU 0x%03lX, requests to 0x%03lX (answered: %s)\n", static_cast<unsigned long>(d.obd.responseId),
+          static_cast<unsigned long>(d.obd.requestId), ids);
   } else if (d.obd.nothingToPoll) {
-    o.put("OBD: ECU 0x%03lX supports none of the polled PIDs - not polling\n",
-          static_cast<unsigned long>(d.obd.responseId));
+    o.put("OBD: answered: %s - none supports the polled PIDs, asking again later\n", ids);
   } else {
     o.put("OBD: no ECU\n");
   }

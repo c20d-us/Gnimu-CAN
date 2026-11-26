@@ -6,6 +6,7 @@
 
 #include "../core/DeviceStatus.h"
 #include "../core/BusSearch.h"
+#include "../core/ObdDiscovery.h"
 #include "../core/ObdPoller.h"
 #include "../core/ProbePolicy.h"
 #include "../core/ResetReason.h"
@@ -57,23 +58,28 @@ class App {
   // (Starting reports the bring-up result); Stay for the others.
   Transition enter(RunState s);
   void setJobs(const JobSet& j);
-  // Boot: listens at each bit rate in turn. False if the controller won't
-  // start at all.
+  // Boot: checks the controller starts. False if it won't.
   bool startCan();
+  // A 12V supply is present (not USB alone): CAN may run.
+  bool hasSupply() const;
+  // The supply arrived: start looking for the bus. Or it left: stop CAN and
+  // forget what was found, back to waiting.
+  void canOn();
+  void canOff();
   // Listens (silently) at `bitrate`, starting a new rate-check window.
   void listenAt(uint32_t bitrate);
   // Clean frames confirm a rate: heard by listening, or answered a probe.
-  void confirmTraffic(uint32_t bitrate, bool byListening);
-  // Gateway probe and ECU discovery each send one request and return; later
-  // can-job runs take the reply or time it out (continueStep), so nothing
-  // waits inside a job.
+  void confirmTraffic(uint32_t bitrate);
+  // Gateway probe and ECU discovery each send a request and return; later
+  // can-job runs take the replies or time them out (continueStep), so
+  // nothing waits inside a job.
   void makeProbe();
-  // Asks the bus for an ECU (Mode 01 PID 0x00). When one answers, polling
-  // starts.
+  // Asks the bus for its ECUs (Mode 01 PID 0x00). When one that supports a
+  // polled PID answers, polling starts.
   void discover();
   void continueStep(uint32_t nowMs);
   void finishProbe(ProbeResult r);
-  void finishDiscovery(bool answered, uint32_t nowMs);
+  void finishDiscovery(uint32_t nowMs);
   // The polled ECU stopped answering: back to waiting, and listening.
   void vehicleLost();
   // Waiting, with traffic confirmed, and the bus has gone quiet: the car has
@@ -105,6 +111,9 @@ class App {
   // Finding the bus, the gateway probe's silence and ECU discovery
   // (core/BusSearch.h); this App does the CAN calls it asks for.
   BusSearch search_;
+  // Finding the ECU to poll: every reply to one request, then a choice
+  // (core/ObdDiscovery.h).
+  ObdDiscovery discovery_;
   // Polled channels, in the order of kPollPids.
   enum : size_t { kRpmChannel, kThrottleChannel, kPollChannels };
   ObdPoller<kPollChannels> poller_;
@@ -115,12 +124,12 @@ class App {
     Idle,
     ProbeSending,  // probe frame queued; waiting to hear it went out
     ProbeWaiting,  // probe acknowledged; waiting for an ECU's reply
-    Discovering,   // discovery request sent; waiting for an ECU's reply
+    Discovering,  // discovery request sent; collecting every ECU's reply (discovery_)
   };
   CanStep step_ = CanStep::Idle;
+  bool canOn_ = false;  // CAN is running: there's a 12V supply
   uint32_t stepStartMs_ = 0;
-  bool stepReplied_ = false;          // a PID 0x00 reply arrived during the step
-  obd2::Mode01Reply stepReply_ = {};  // ... and this is it
+  bool stepReplied_ = false;  // a PID 0x00 reply arrived during a probe
   // Sleep.
   SleepPolicy sleepPolicy_;
   SleepView sleepView_ = {};

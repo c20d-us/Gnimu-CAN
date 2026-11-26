@@ -54,7 +54,7 @@ class ObdPoller {
     lastAnyReplyMs_ = nowMs;
     for (size_t i = 0; i < N; i++) {
       PollChannel& c = ch_[i];
-      c.supported = isSupported(supportBitmap, c.pid);
+      c.supported = obd2::pidSupported(supportBitmap, c.pid);
       c.requests = c.replies = c.timeouts = 0;
       c.valid = false;
       c.len = 0;
@@ -121,13 +121,6 @@ class ObdPoller {
   const PollChannel& channel(size_t i) const { return ch_[i]; }
   size_t channelCount() const { return N; }
   uint32_t requestId() const { return requestId_; }
-
-  // Whether `pid` (0x01-0x20) is set in a PID 0x00 support bitmap, where the
-  // bitmap's top bit is PID 0x01.
-  static bool isSupported(uint32_t bitmap, uint8_t pid) {
-    if (pid < 0x01 || pid > 0x20) return false;
-    return (bitmap >> (32 - pid)) & 1u;
-  }
 
  private:
   PollChannel ch_[N];

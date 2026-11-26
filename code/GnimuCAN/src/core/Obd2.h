@@ -5,6 +5,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "CanFrame.h"
@@ -26,6 +27,29 @@ constexpr uint8_t kPadByte = 0x55;           // ISO 15765-4's recommended paddin
 inline CanFrame mode01Request(uint8_t pid, uint32_t requestId = kFunctionalRequestId) {
   CanFrame f = {requestId, false, 8, {0x02, kModeCurrentData, pid, kPadByte, kPadByte, kPadByte, kPadByte, kPadByte}};
   return f;
+}
+
+// Whether `pid` (0x01-0x20) is set in a PID 0x00 support bitmap, where the
+// bitmap's top bit is PID 0x01.
+inline bool pidSupported(uint32_t bitmap, uint8_t pid) {
+  if (pid < 0x01 || pid > 0x20) return false;
+  return (bitmap >> (32 - pid)) & 1u;
+}
+
+// Room for formatResponseIds(): eight "0x7E8, " entries and the terminator.
+constexpr size_t kResponseIdsTextMax = 8 * 7 + 1;
+
+// The response IDs in `mask` (bit n: 0x7E8 + n), as "0x7E8, 0x7E9". Empty
+// for no bits.
+inline void formatResponseIds(char* out, size_t cap, uint8_t mask) {
+  size_t len = 0;
+  out[0] = '\0';
+  for (uint8_t n = 0; n < 8; n++) {
+    if (!(mask & (1u << n)) || len >= cap) continue;
+    const int w = snprintf(out + len, cap - len, "%s0x%03lX", len ? ", " : "",
+                           static_cast<unsigned long>(kFirstResponseId + n));
+    if (w > 0) len += static_cast<size_t>(w);
+  }
 }
 
 struct Mode01Reply {

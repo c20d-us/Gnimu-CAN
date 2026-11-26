@@ -23,7 +23,8 @@
 // sends a frame on 0x100 every 10 ms, the kind of chatter an ungatewayed bus
 // carries, so Gnimu-CAN's listen-only rate check has something to hear. In
 // "gateway" mode it stays silent until asked, like an OBD port behind a
-// gateway. If its controller goes bus-off, it restarts it by itself, as a
+// gateway. With SECOND on, a transmission ECU answers too, on 0x7E9 and
+// before the engine, supporting neither RPM nor throttle. If its controller goes bus-off, it restarts it by itself, as a
 // real ECU would, and says so.
 //
 // Console commands (end with Enter):
@@ -37,6 +38,8 @@
 //                 or put them back
 //   MUTE / UNMUTE keep the chatter going but ignore every request (a bus with
 //                 traffic where no ECU answers OBD), or answer again
+//   SECOND / ONE  add a transmission ECU (0x7E9, answers first, PIDs 01 and
+//                 0D only: no RPM or throttle), or go back to the engine alone
 //   S             print the status line now
 //
 // Target: Seeed XIAO ESP32C6, serial console at 115200. Leave the CAN Pal's
@@ -63,6 +66,8 @@ constexpr uint8_t kLedPin = LED_BUILTIN;    // GPIO15, active low
 constexpr uint32_t kFunctionalId = 0x7DF;
 constexpr uint32_t kPhysicalId = 0x7E0;
 constexpr uint32_t kReplyId = 0x7E8;
+constexpr uint32_t kTcmRequestId = 0x7E1;  // SECOND: the transmission ECU
+constexpr uint32_t kTcmReplyId = 0x7E9;
 constexpr uint32_t kChatterId = 0x100;
 constexpr uint32_t kChatterPeriodMs = 10;
 constexpr uint32_t kStatusPeriodMs = 1000;
@@ -72,6 +77,7 @@ bool gatewayMode = false;
 bool answering = true;
 bool hidePolled = false;  // HIDE: no RPM or throttle
 bool muted = false;       // MUTE: chatter, but no replies
+bool secondEcu = false;   // SECOND: a transmission ECU answers too, first
 uint32_t replyDelayMs = 2;
 
 uint32_t requests = 0;
@@ -159,16 +165,28 @@ uint8_t pidData(uint8_t pid, uint32_t ms, uint8_t (&d)[4]) {
   }
 }
 
-void reply(uint8_t pid) {
-  uint8_t d[4] = {};
-  const uint8_t n = pidData(pid, millis(), d);
-  if (n == 0) {
-    unsupported++;
-    return;
+// The transmission ECU's PIDs: 0x00 (supported: 01 and 0D), 0x01 (monitor
+// status, all clear) and 0x0D (speed). No RPM, no throttle.
+uint8_t tcmPidData(uint8_t pid, uint32_t ms, uint8_t (&d)[4]) {
+  switch (pid) {
+    case 0x00:
+      d[0] = 0x80;  // PID 01
+      d[1] = 0x08;  // PID 0D
+      d[2] = d[3] = 0x00;
+      return 4;
+    case 0x01:
+      d[0] = d[1] = d[2] = d[3] = 0x00;
+      return 4;
+    case 0x0D:
+      return pidData(0x0D, ms, d);
+    default:
+      return 0;
   }
-  if (replyDelayMs) delay(replyDelayMs);
+}
+
+void sendReply(uint32_t id, uint8_t pid, const uint8_t* d, uint8_t n) {
   twai_message_t m = {};
-  m.identifier = kReplyId;
+  m.identifier = id;
   m.data_length_code = 8;
   m.data[0] = static_cast<uint8_t>(2 + n);  // ISO-TP single frame: mode, PID, data
   m.data[1] = 0x41;
@@ -181,12 +199,35 @@ void reply(uint8_t pid) {
   }
 }
 
+void reply(uint8_t pid) {
+  uint8_t d[4] = {};
+  const uint8_t n = pidData(pid, millis(), d);
+  if (n == 0) {
+    unsupported++;
+    return;
+  }
+  if (replyDelayMs) delay(replyDelayMs);
+  sendReply(kReplyId, pid, d, n);
+}
+
+void tcmReply(uint8_t pid) {
+  uint8_t d[4] = {};
+  const uint8_t n = tcmPidData(pid, millis(), d);
+  if (n > 0) sendReply(kTcmReplyId, pid, d, n);
+}
+
 void handleFrame(const twai_message_t& m) {
-  if (m.extd || (m.identifier != kFunctionalId && m.identifier != kPhysicalId)) return;
+  const bool toTcm = secondEcu && m.identifier == kTcmRequestId;
+  if (m.extd || (m.identifier != kFunctionalId && m.identifier != kPhysicalId && !toTcm)) return;
   if (m.data_length_code < 3 || m.data[0] != 0x02 || m.data[1] != 0x01) return;
   requests++;
-  if (answering && !muted) reply(m.data[2]);
+  if (!answering || muted) return;
+  // The transmission answers a functional request before the engine does.
+  if (secondEcu && m.identifier != kPhysicalId) tcmReply(m.data[2]);
+  if (!toTcm) reply(m.data[2]);
 }
+
+
 
 void sendChatter() {
   twai_message_t m = {};
@@ -200,20 +241,18 @@ void sendChatter() {
 void printStatus() {
   twai_status_info_t s = {};
   twai_get_status_info(&s);
-  Serial.printf("up %lus | %s, %lu kbit/s, %s%s%s, delay %lu ms | requests %lu, replies %lu, unsupported %lu, chatter %lu | "
+  Serial.printf("up %lus | %s, %lu kbit/s, %s%s%s%s, delay %lu ms | requests %lu, replies %lu, unsupported %lu, chatter %lu | "
                 "TEC %lu REC %lu%s, bus-off recoveries %lu\n",
                 millis() / 1000, gatewayMode ? "gateway" : "broadcast", bitrate / 1000, answering ? "answering" : "OFF",
-                muted ? ", MUTED" : "", hidePolled ? ", RPM+throttle HIDDEN" : "", replyDelayMs, requests, replies, unsupported, chatterSent, s.tx_error_counter, s.rx_error_counter,
+                muted ? ", MUTED" : "", secondEcu ? ", +TCM 0x7E9" : "", hidePolled ? ", RPM+throttle HIDDEN" : "", replyDelayMs, requests, replies, unsupported, chatterSent, s.tx_error_counter, s.rx_error_counter,
                 s.state == TWAI_STATE_BUS_OFF ? " BUS OFF" : "", busOffRecoveries);
 }
 
 void handleLine(String cmd) {
   cmd.trim();
   cmd.toUpperCase();
-  if (cmd == "GATEWAY") {
-    gatewayMode = true;
-  } else if (cmd == "BROADCAST") {
-    gatewayMode = false;
+  if (cmd == "GATEWAY" || cmd == "BROADCAST") {
+    gatewayMode = cmd == "GATEWAY";
   } else if (cmd == "OFF") {
     answering = false;
   } else if (cmd == "ON") {
@@ -222,6 +261,8 @@ void handleLine(String cmd) {
     hidePolled = true;
   } else if (cmd == "SHOW") {
     hidePolled = false;
+  } else if (cmd == "SECOND" || cmd == "ONE") {
+    secondEcu = cmd == "SECOND";
   } else if (cmd == "MUTE") {
     muted = true;
   } else if (cmd == "UNMUTE") {
@@ -233,7 +274,7 @@ void handleLine(String cmd) {
     const long v = cmd.substring(6).toInt();
     if (v >= 0 && v <= 100) replyDelayMs = static_cast<uint32_t>(v);
   } else if (cmd != "S") {
-    Serial.printf("Unknown '%s': GATEWAY, BROADCAST, RATE 500|250, DELAY n, OFF, ON, HIDE, SHOW, MUTE, UNMUTE, S\n", cmd.c_str());
+    Serial.printf("Unknown '%s': GATEWAY, BROADCAST, RATE 500|250, DELAY n, OFF, ON, HIDE, SHOW, SECOND, ONE, MUTE, UNMUTE, S\n", cmd.c_str());
     return;
   }
   printStatus();
@@ -258,7 +299,7 @@ void setup() {
   Serial.println();
   Serial.println("Gnimu-CAN fake ECU");
   Serial.printf("CAN: %s at %lu kbit/s\n", startCan() ? "started" : "FAILED", bitrate / 1000);
-  Serial.println("Commands: GATEWAY, BROADCAST, RATE 500|250, DELAY n, OFF, ON, HIDE, SHOW, MUTE, UNMUTE, S");
+  Serial.println("Commands: GATEWAY, BROADCAST, RATE 500|250, DELAY n, OFF, ON, HIDE, SHOW, SECOND, ONE, MUTE, UNMUTE, S");
   printStatus();
 }
 

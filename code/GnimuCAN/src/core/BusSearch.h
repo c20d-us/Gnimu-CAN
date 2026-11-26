@@ -6,33 +6,32 @@
 
 #include <stdint.h>
 
-#include "DiscoveryBackoff.h"
-
 namespace gnimu {
 
 // What the App should do next while waiting for a vehicle (docs/
 // architecture.md, Bring-up).
 enum class BusAction : uint8_t {
-  None,
+  None,        // nothing for the bus search: with traffic confirmed, the vehicle source decides
   Confirm,     // clean frames in this window: traffic at its rate
   Probe,       // make a gateway probe
-  NextWindow,  // this window is over: listen at the other rate
-  Discover,    // ask for an ECU
+  NextWindow,  // this window is over (time up, or bus errors): listen at the other rate
   Quiet,       // the bus has gone quiet: start over (call quiet())
 };
 
 struct BusSearchConfig {
   uint32_t windowMs;  // one listen window at a rate
   uint32_t quietMs;   // no frames this long, with traffic confirmed: the car is off
-  DiscoveryBackoff backoff;
 };
 
 // Finding the car's bus while waiting for a vehicle: listen windows at each
-// bit rate, silence for gateway probes, confirmed traffic, ECU discovery with
-// its backoff, and starting over when the bus goes quiet. Pure logic: the App
-// starts the controller, sends and receives, and reports here; next() says
-// what to do. The probe's own timing (supply hold, backoff, budget) stays in
-// ProbePolicy; this says only whether the bus is silent enough for one.
+// bit rate, silence for gateway probes, confirmed traffic, and starting over
+// when the bus goes quiet. It knows nothing of ECUs: what happens once
+// traffic is confirmed belongs to the vehicle source (OBD discovery and
+// polling here; a CAN tap build would decode broadcast frames instead).
+// Pure logic: the App starts the controller, receives, and reports here;
+// next() says what to do. The probe's own timing (supply hold, interval)
+// stays in ProbePolicy; this says only whether the bus is silent enough for
+// one.
 class BusSearch {
  public:
   explicit BusSearch(const BusSearchConfig& c) : c_(c) {}
@@ -44,16 +43,11 @@ class BusSearch {
     windowFrames_ = 0;
   }
 
-  // The boot listen at `rate`: `frames` heard, `clean` with no bus errors. A
-  // clean silent listen counts as a silent window at that rate.
-  void bootListen(uint32_t rate, uint32_t frames, bool clean, uint32_t nowMs) {
-    rate_ = rate;
-    if (frames > 0) {
-      lastFrameMs_ = nowMs;
-      silentAt_ = 0;
-    } else if (clean) {
-      silentAt_ |= rateBit(rate);
-    }
+  // CAN switched off (no 12V): start from nothing, then listen() again.
+  void restart() {
+    trafficRate_ = 0;
+    windowFrames_ = 0;
+    silentAt_ = 0;
   }
 
   // Any frame received, in any state.
@@ -63,34 +57,10 @@ class BusSearch {
     silentAt_ = 0;
   }
 
-  // Traffic confirmed at `rate`, by listening or by a probe the car answered:
-  // discovery starts now, from its first interval. True the first time this
-  // boot that traffic is heard by listening (no more probes from then on).
-  bool confirmed(uint32_t rate, bool byListening, uint32_t nowMs) {
+  // Traffic confirmed at `rate`, by listening or by a probe the car answered.
+  void confirmed(uint32_t rate) {
     rate_ = rate;
     trafficRate_ = rate;
-    nextDiscoveryMs_ = nowMs;
-    failures_ = 0;
-    nothingToPoll_ = false;
-    const bool first = byListening && !heardByListening_;
-    if (byListening) heardByListening_ = true;
-    return first;
-  }
-
-  // No ECU answered discovery: the wait before asking again.
-  uint32_t discoveryFailed(uint32_t nowMs) {
-    failures_++;
-    const uint32_t waitMs = discoveryRetryMs(c_.backoff, failures_);
-    nextDiscoveryMs_ = nowMs + waitMs;
-    return waitMs;
-  }
-
-  // An ECU answered discovery. With nothing to poll, discovery stops until the
-  // bus goes quiet: polling would lose the "vehicle" in 2 s and find it again,
-  // round and round.
-  void ecuFound(bool anythingToPoll) {
-    failures_ = 0;
-    nothingToPoll_ = !anythingToPoll;
   }
 
   // Polling, and the ECU stopped answering: back to looking for traffic.
@@ -101,12 +71,13 @@ class BusSearch {
   // bus errors since the window began. `probeDue`: ProbePolicy allows a probe
   // now, given probeSilence().
   BusAction next(uint32_t nowMs, bool clean, bool probeDue) {
-    if (trafficRate_ != 0) {
-      if (nowMs - lastFrameMs_ >= c_.quietMs) return BusAction::Quiet;
-      if (!nothingToPoll_ && static_cast<int32_t>(nowMs - nextDiscoveryMs_) >= 0) return BusAction::Discover;
-      return BusAction::None;
-    }
+    if (trafficRate_ != 0) return nowMs - lastFrameMs_ >= c_.quietMs ? BusAction::Quiet : BusAction::None;
     if (windowFrames_ > 0 && clean) return BusAction::Confirm;
+    // Bus errors at this rate: likely traffic at the other one, so go and
+    // listen there rather than wait out the window. Not at once, so a bus
+    // that shows errors at both rates (CAN FD frames, say) switches a few
+    // times a second, not every run.
+    if (!clean && nowMs - windowStartMs_ >= c_.windowMs / 10) return BusAction::NextWindow;
     if (probeDue) return BusAction::Probe;
     if (nowMs - windowStartMs_ >= c_.windowMs) {
       if (windowFrames_ == 0 && clean) silentAt_ |= rateBit(rate_);
@@ -120,22 +91,18 @@ class BusSearch {
   // has to be listened to.
   void quiet() {
     trafficRate_ = 0;
-    failures_ = 0;
-    nothingToPoll_ = false;
     silentAt_ = rateBit(rate_);
   }
 
   // A gateway probe goes onto the bus at a rate nobody has confirmed, so only
-  // when it's silent at both rates (a whole window at each with no frame, so
-  // a live bus at the other rate is always found first), and never once the
-  // bus has been heard by listening: that port isn't gatewayed.
-  bool probeSilence() const { return !heardByListening_ && silentAt_ == kBoth; }
+  // when it's silent at both rates: a whole window at each with no frame and
+  // no bus error, so a live bus at the other rate is always found first.
+  // Having heard the bus earlier doesn't rule a probe out: some gatewayed
+  // ports carry traffic only for a few seconds after a diagnostic request.
+  bool probeSilence() const { return silentAt_ == kBoth; }
 
-  uint32_t rate() const { return rate_; }                 // listening at
-  uint32_t trafficRate() const { return trafficRate_; }   // confirmed; 0 for none
-  bool nothingToPoll() const { return nothingToPoll_; }
-  uint32_t failures() const { return failures_; }         // unanswered discovery requests
-  bool heardByListening() const { return heardByListening_; }
+  uint32_t rate() const { return rate_; }                // listening at
+  uint32_t trafficRate() const { return trafficRate_; }  // confirmed; 0 for none
   uint32_t silentForMs(uint32_t nowMs) const { return nowMs - lastFrameMs_; }
 
   static uint32_t otherRate(uint32_t rate) { return rate == 500000 ? 250000 : 500000; }
@@ -150,11 +117,7 @@ class BusSearch {
   uint32_t windowFrames_ = 0;
   uint32_t lastFrameMs_ = 0;
   uint8_t silentAt_ = 0;  // bit 0: 500 kbit/s, bit 1: 250 kbit/s
-  bool heardByListening_ = false;
   uint32_t trafficRate_ = 0;
-  uint32_t nextDiscoveryMs_ = 0;
-  uint32_t failures_ = 0;
-  bool nothingToPoll_ = false;
 };
 
 }  // namespace gnimu

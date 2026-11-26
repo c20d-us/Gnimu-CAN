@@ -33,6 +33,7 @@ struct SleepPolicyConfig {
   uint32_t busSilentMs;   // no frames for this long counts as a silent bus
   uint32_t cutoffHoldMs;  // below the cutoff this long, continuously, before sleeping
   float noSupplyV;        // below: the device can only be running from USB
+  uint32_t graceMs;       // after the supply arrives, no sleep decisions this long
 };
 
 enum class SleepDecision : uint8_t { None, Parked, Cutoff };
@@ -54,7 +55,14 @@ class SleepPolicy {
 
   SleepDecision update(const SleepInputs& in, uint32_t nowMs) {
     noSupply_ = in.supply.valid && in.supply.volts < c_.noSupplyV;
-    if (in.stayAwake || !in.supply.valid || noSupply_) {
+    const bool supplied = in.supply.valid && !noSupply_;
+    if (supplied && !supplied_) suppliedSinceMs_ = nowMs;
+    supplied_ = supplied;
+    // A grace after the supply arrives (power-up, or switched on with USB
+    // already connected): the supply level lags the voltage by its hold
+    // times, so it can still say "below cutoff" from 0V on USB, and the car's
+    // voltage may still be ramping.
+    if (in.stayAwake || !supplied || nowMs - suppliedSinceMs_ < c_.graceMs) {
       parked_ = false;
       low_ = false;
       return SleepDecision::None;
@@ -94,6 +102,8 @@ class SleepPolicy {
   bool low_ = false;
   uint32_t lowSinceMs_ = 0;
   bool noSupply_ = false;
+  bool supplied_ = false;
+  uint32_t suppliedSinceMs_ = 0;
 };
 
 struct WakeConfig {

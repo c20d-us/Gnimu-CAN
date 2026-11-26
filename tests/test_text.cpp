@@ -38,6 +38,7 @@ static DeviceStatus worstCase() {
   d.obd.ecuFound = true;
   d.obd.responseId = 0x7EF;
   d.obd.requestId = 0x7E7;
+  d.obd.answeredEcus = 0xFF;
   d.obd.channelCount = kMaxObdChannels;
   for (size_t i = 0; i < kMaxObdChannels; i++) {
     ObdChannelView& c = d.obd.channels[i];

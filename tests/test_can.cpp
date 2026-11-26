@@ -61,7 +61,7 @@ static void testRejectsOtherFrames() {
   assert(!obd2::parseMode01Reply(ext, 0x0C, r));
 }
 
-static ProbePolicy policy() { return ProbePolicy({12.4f, 3000, 30000, 5}); }
+static ProbePolicy policy() { return ProbePolicy({12.4f, 3000, 10000}); }
 
 static void testProbeNeedsHighSupplyHeldAndSilentBus() {
   ProbePolicy p = policy();
@@ -75,20 +75,24 @@ static void testProbeNeedsHighSupplyHeldAndSilentBus() {
   assert(!p.due(true, 20000));  // no valid reading
 }
 
-static void testProbeBacksOffAndStops() {
+// One probe every 10 s for as long as the bus is silent and the supply high,
+// with no cap.
+static void testProbesKeepComingEveryInterval() {
   ProbePolicy p = policy();
   p.supply(true, 14.0f, 0);
   uint32_t now = 3000;
-  for (uint8_t i = 0; i < 5; i++) {
+  for (uint32_t i = 0; i < 100; i++) {
     assert(p.due(true, now));
     p.record(ProbeResult::NoAck, now);
     assert(p.attempts() == i + 1);
-    assert(!p.due(true, now + 29999));  // backing off
-    now += 30000;
+    assert(!p.due(true, now + 9999));  // waiting out the interval
+    now += 10000;
   }
-  assert(p.exhausted());
-  assert(!p.due(true, now + 1000000));  // never again this boot
+  assert(p.due(true, now));
   assert(p.last() == ProbeResult::NoAck);
+  p.reset();  // a vehicle found
+  assert(p.attempts() == 0 && p.last() == ProbeResult::None);
+  assert(p.due(true, now + 1));  // lost again: no wait for the first
 }
 
 static void testDippingSupplyRestartsTheHold() {
@@ -106,7 +110,7 @@ int main() {
   testParsesSecondEcu();
   testRejectsOtherFrames();
   testProbeNeedsHighSupplyHeldAndSilentBus();
-  testProbeBacksOffAndStops();
+  testProbesKeepComingEveryInterval();
   testDippingSupplyRestartsTheHold();
   printf("test_can: ok\n");
   return 0;

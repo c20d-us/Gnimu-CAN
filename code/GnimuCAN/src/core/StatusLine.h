@@ -38,11 +38,12 @@ inline size_t formatStatus(char *buf, size_t cap, const DeviceStatus &d, const S
   } else {
     o.put("Supply: - | ");
   }
-  if (d.canSummary.trafficBitrate) {
+  if (d.canSummary.noSupply) {
+    o.put("CAN: off, no 12V | ");
+  } else if (d.canSummary.trafficBitrate) {
     o.put("CAN: %lu kbit/s | ", static_cast<unsigned long>(d.canSummary.trafficBitrate / 1000));
   } else {
-    o.put("CAN: silent, probes %u/%u | ", static_cast<unsigned>(d.canSummary.probes),
-          static_cast<unsigned>(d.canSummary.maxProbes));
+    o.put("CAN: silent, probes %lu | ", static_cast<unsigned long>(d.canSummary.probes));
   }
   if (d.obd.ecuFound) {
     o.put("OBD:");

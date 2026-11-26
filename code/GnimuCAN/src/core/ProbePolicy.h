@@ -36,13 +36,14 @@ inline const char* probeResultText(ProbeResult r) {
 struct ProbeConfig {
   float minV;           // supply at or above this ...
   uint32_t holdMs;      // ... for this long, with the bus silent, allows a probe
-  uint32_t backoffMs;   // between tries
-  uint8_t maxAttempts;  // per boot
+  uint32_t intervalMs;  // between probes
 };
 
 // When to make a gateway probe: a silent bus with the supply high enough that
-// the car may be on behind a gateway. At most maxAttempts single frames per
-// boot, backoffMs apart, so a car that never answers sees very little.
+// the car may be on behind a gateway. One single frame every intervalMs for
+// as long as that lasts, with no cap, so a car started at any time is found.
+// A parked car that never answers sees one frame every intervalMs until the
+// device sleeps; its wake checks only listen.
 class ProbePolicy {
  public:
   explicit ProbePolicy(const ProbeConfig& c) : c_(c) {}
@@ -56,9 +57,9 @@ class ProbePolicy {
 
   // True when a probe should go now.
   bool due(bool busSilent, uint32_t nowMs) const {
-    if (!busSilent || !high_ || attempts_ >= c_.maxAttempts) return false;
+    if (!busSilent || !high_) return false;
     if (nowMs - highSinceMs_ < c_.holdMs) return false;
-    return attempts_ == 0 || nowMs - lastMs_ >= c_.backoffMs;
+    return attempts_ == 0 || nowMs - lastMs_ >= c_.intervalMs;
   }
 
   void record(ProbeResult r, uint32_t nowMs) {
@@ -67,15 +68,14 @@ class ProbePolicy {
     last_ = r;
   }
 
-  // A vehicle was found and has since gone quiet: the car may come back later
-  // in this boot, so the probe budget starts over.
+  // A vehicle was found: the count starts over, and if it's lost later, the
+  // first probe may go as soon as the bus is silent.
   void reset() {
     attempts_ = 0;
     last_ = ProbeResult::None;
   }
 
-  uint8_t attempts() const { return attempts_; }
-  bool exhausted() const { return attempts_ >= c_.maxAttempts; }
+  uint32_t attempts() const { return attempts_; }  // since boot, or the last vehicle found
   ProbeResult last() const { return last_; }
   const ProbeConfig& config() const { return c_; }
 
@@ -83,7 +83,7 @@ class ProbePolicy {
   ProbeConfig c_;
   bool high_ = false;
   uint32_t highSinceMs_ = 0;
-  uint8_t attempts_ = 0;
+  uint32_t attempts_ = 0;
   uint32_t lastMs_ = 0;
   ProbeResult last_ = ProbeResult::None;
 };

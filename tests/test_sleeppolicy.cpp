@@ -12,7 +12,7 @@
 
 using namespace gnimu;
 
-static const SleepPolicyConfig kPolicy = {300000, 10000, 5000, 6.0f};
+static const SleepPolicyConfig kPolicy = {300000, 10000, 5000, 6.0f, 0};
 static const WakeConfig kWake = {13.2f, 11.8f, 12.1f, 0.3f, 6.0f};
 
 static SupplyStatus supply(float v, SupplyLevel l) { return {true, v, l}; }
@@ -177,7 +177,29 @@ static void testWakeCutoffHysteresis() {
   assert(d.result == WakeResult::SleepCutoff);
 }
 
+// Found on the first car test: switched on at 14.2V after 0V on USB, the
+// lagging supply level must not trigger the cutoff sleep.
+static void testGraceAfterTheSupplyArrives() {
+  SleepPolicyConfig c = kPolicy;
+  c.graceMs = 30000;
+  SleepPolicy p(c);
+  SleepInputs usb = {false, false, {true, 0.0f, SupplyLevel::BelowCutoff}, 0, false};
+  assert(p.update(usb, 0) == SleepDecision::None && p.noSupply());
+  // Switched on at 100 s: the level still says below cutoff for a while.
+  SleepInputs on = {false, false, {true, 14.2f, SupplyLevel::BelowCutoff}, 0, false};
+  for (uint32_t t = 100000; t < 130000; t += 100) assert(p.update(on, t) == SleepDecision::None);
+  // A real cutoff after the grace still sleeps, after its own hold.
+  SleepInputs low = {false, false, {true, 11.5f, SupplyLevel::BelowCutoff}, 0, false};
+  assert(p.update(low, 130000) == SleepDecision::None);
+  assert(p.update(low, 135000) == SleepDecision::Cutoff);
+  // Off and on again: a new grace.
+  assert(p.update(usb, 136000) == SleepDecision::None);
+  assert(p.update(low, 137000) == SleepDecision::None);
+  assert(p.update(low, 150000) == SleepDecision::None);
+}
+
 int main() {
+  testGraceAfterTheSupplyArrives();
   testParkedAfterHold();
   testAnythingAwakeRestartsTheHold();
   testStayAwakeAndNoReading();

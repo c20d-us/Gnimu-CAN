@@ -20,9 +20,9 @@ namespace config {
 // Scheduler jobs: how often each runs, and the time budget past which a run
 // counts as an overrun in the D report.
 
-// CAN: drains the controller's receive queue, checks the bit rate, and makes
-// gateway probes. A probe blocks the job for up to about 70 ms; it happens at
-// most 5 times per boot.
+// CAN: drains the controller's receive queue, checks the bit rate, makes
+// gateway probes and asks for an ECU. Nothing waits inside it: a request is
+// sent, and later runs take the reply or time it out.
 constexpr uint32_t kCanPeriodUs = 10000;
 constexpr uint32_t kCanBudgetUs = 2000;
 // The frame: one Gnimu frame per period while a client is subscribed.
@@ -59,19 +59,20 @@ constexpr uint32_t kStatusMaxCount = 3600;
 
 // CAN bring-up
 
-// Boot listens this long at each bit rate before deciding the bus is silent.
-constexpr uint32_t kCanBootListenMs = 300;
-// While waiting for the vehicle, it keeps listening, switching between the
-// bit rates this often until it hears clean traffic.
+// While waiting for the vehicle, it listens, switching between the bit rates
+// this often (or sooner, at the first bus error) until it hears clean
+// traffic. Traffic at the rate it's listening at is confirmed by its first
+// clean frame, so finding a live bus takes milliseconds, not a window.
 constexpr uint32_t kCanRateWindowMs = 2000;
 // Gateway probe: the supply must stay at or above kGatewayProbeMinV this long
-// first; then at most kProbeMaxAttempts tries per boot, kProbeBackoffMs apart,
-// each waiting kProbeReplyMs (the ISO 15765-4 P2 limit) for an ECU's reply.
+// first; then one single-shot frame every kProbeIntervalMs while the bus stays
+// silent, each waiting kProbeReplyMs for an ECU's reply. Longer than the 50 ms
+// ISO 15765-4 P2 limit: a gateway passing the request on may answer later,
+// and waiting costs nothing.
 constexpr uint32_t kProbeHoldMs = 3000;
-constexpr uint32_t kProbeBackoffMs = 30000;
-constexpr uint8_t kProbeMaxAttempts = 5;
-constexpr uint32_t kProbeReplyMs = 50;
-// How long the controller gets to report the probe frame sent or failed: a
+constexpr uint32_t kProbeIntervalMs = 10000;
+constexpr uint32_t kProbeReplyMs = 1000;
+// How long the controller gets to report a probe frame sent or failed: a
 // single 8-byte frame takes well under 1 ms at 250 kbit/s.
 constexpr uint32_t kProbeTxConfirmMs = 20;
 
@@ -103,6 +104,10 @@ constexpr uint32_t kWakeListenMs = 150;
 // Below this the regulator can't run the XIAO, so the device must be on USB
 // with no 12 V connected: it never sleeps then (no battery to protect).
 constexpr float kNoSupplyV = 6.0f;
+// No sleep decisions this long after the supply arrives (at power-up, or a
+// switch-on with USB already connected): the supply level settles and the
+// car's voltage ramps first.
+constexpr uint32_t kSleepGraceMs = 30000;
 
 // Supply voltage
 
@@ -136,6 +141,8 @@ static_assert(kGatewayProbeMinV > kLowVoltageCutoffV && kGatewayProbeMinV <= kEn
               "the gateway probe threshold must sit between the cutoff and engine running");
 static_assert(kGatewayProbeBitrate == 500000 || kGatewayProbeBitrate == 250000,
               "the gateway probe runs at 500 or 250 kbit/s");
+static_assert(kProbeReplyMs > kProbeTxConfirmMs && kProbeReplyMs < kProbeIntervalMs,
+              "a probe waits longer for a reply than for the frame to go, and ends before the next is due");
 static_assert(kRpmPeriodMs >= 10 && kThrottlePeriodMs >= 10, "poll periods must be at least 10 ms");
 static_assert(kChannelStaleMs > kRpmPeriodMs && kChannelStaleMs > kThrottlePeriodMs,
               "a channel must stay fresh for longer than its poll period");

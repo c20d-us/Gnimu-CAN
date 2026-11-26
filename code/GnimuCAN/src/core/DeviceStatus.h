@@ -18,10 +18,10 @@ namespace gnimu {
 
 // What the CAN side has found, kept by App.
 struct CanSummary {
+  bool noSupply;            // CAN is off: no 12V supply (USB alone)
   uint32_t trafficBitrate;  // the rate clean traffic was heard at, 0 for none yet
   uint32_t framesSeen;      // frames received since boot
-  uint8_t probes;           // gateway probes made this boot
-  uint8_t maxProbes;
+  uint32_t probes;          // gateway probes since boot or the last vehicle found
   ProbeResult lastProbe;
 };
 
@@ -44,7 +44,8 @@ constexpr size_t kMaxObdChannels = 4;
 // What OBD polling has found, kept by App.
 struct ObdSummary {
   bool ecuFound;
-  bool nothingToPoll;   // an ECU answered, but supports none of the polled PIDs
+  bool nothingToPoll;   // ECUs answered, but none supports a polled PID: asking again later
+  uint8_t answeredEcus; // bit n: 0x7E8 + n answered the last discovery request
   uint32_t responseId;  // the ECU's reply ID, 0x7E8 for the engine ECU
   uint32_t requestId;   // its physical request ID
   uint8_t channelCount;

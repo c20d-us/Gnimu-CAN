@@ -31,15 +31,14 @@ static CanFrame reply(uint32_t id, uint8_t pid, uint8_t a, uint8_t b) {
 }
 
 static void testSupportBitmap() {
-  typedef ObdPoller<2> P;
-  assert(P::isSupported(kBoth, 0x0C));
-  assert(P::isSupported(kBoth, 0x11));
-  assert(P::isSupported(kBoth, 0x05));
-  assert(P::isSupported(kBoth, 0x20));
-  assert(!P::isSupported(kBoth, 0x0B));
-  assert(P::isSupported(0x80000000u, 0x01));
-  assert(!P::isSupported(0xFFFFFFFFu, 0x00));
-  assert(!P::isSupported(0xFFFFFFFFu, 0x21));
+  assert(obd2::pidSupported(kBoth, 0x0C));
+  assert(obd2::pidSupported(kBoth, 0x11));
+  assert(obd2::pidSupported(kBoth, 0x05));
+  assert(obd2::pidSupported(kBoth, 0x20));
+  assert(!obd2::pidSupported(kBoth, 0x0B));
+  assert(obd2::pidSupported(0x80000000u, 0x01));
+  assert(!obd2::pidSupported(0xFFFFFFFFu, 0x00));
+  assert(!obd2::pidSupported(0xFFFFFFFFu, 0x21));
 }
 
 static void testOneInFlight() {

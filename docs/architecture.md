@@ -64,7 +64,7 @@ The same layers as Gnimu, plus `protocol/`, under `code/GnimuCAN/src/`, with the
 
 | Layer | What's in it |
 |---|---|
-| `core/` | Plain C++, host-tested: the scheduler, the run-state machine, the supply monitor, the bus search (listen windows, silence for gateway probes, discovery and its backoff, starting over on a quiet bus), the gateway probe policy, the OBD-II request/reply codec, the poller, vehicle activity, the sleep policy and wake check, the LED patterns, the report and status-line formatters, and the BLE JSON documents. |
+| `core/` | Plain C++, host-tested: the scheduler, the run-state machine, the supply monitor, the bus search (listen windows, silence for gateway probes, starting over on a quiet bus), OBD discovery (every reply in P2, choosing the ECU, the backoff), the gateway probe policy and probe sequence, the OBD-II request/reply codec, the poller, vehicle activity, the sleep policy and wake check, the LED patterns, the report and status-line formatters, and the BLE JSON documents. |
 | `platform/` | The board: clock, watchdog, reset reason, hardware ID, the TWAI controller and silent pin (`CanPort`), the supply ADC, the LED, the console port, deep sleep and the record kept across it (`DeepSleep`). ESP32-C6 only for now, but kept behind headers so `core/` stays testable. |
 | `peripherals/` | The BLE transport: the Gnimu service on NimBLE, through the Arduino BLE library. |
 | `protocol/` | The Gnimu frame encoder and layout, the protocol repo's C++ reference, copied in. |
@@ -117,40 +117,41 @@ The emitter keeps its rate fixed whatever happens upstream. That's the consisten
 
 ### Bring-up
 
-1. **Controller start, listen-only.** TWAI starts in listen-only mode while the transceiver is still held silent by R1. A failure here is a hardware fault.
-2. **Bit-rate check.** The firmware listens for traffic at 500 kbit/s, then 250 kbit/s: 300 ms each at boot, then 2 s windows alternating between the two while it waits. Clean frames with no bus errors confirm the rate. This step only listens and never transmits.
-3. **Go active.** It restarts TWAI in normal mode at the confirmed rate and drives `CAN_SILENT` low.
-4. **ECU discovery.** It sends Mode 01 PID `0x00` to the functional address `0x7DF`. The first responder in `0x7E8`–`0x7EF` becomes the target, normally the engine ECU at `0x7E8`. From then on, requests go to that ECU's physical address (response ID − 8, usually `0x7E0`), so only one ECU answers.
-5. **Supported PIDs.** The PID `0x00` reply is the support bitmap for PIDs `0x01`–`0x20`. Any polled channel the car doesn't list is dropped, and the log says so. v1's channels are all in that range; reading the later bitmaps (`0x20`, `0x40`, ...) comes with channels that need them.
+1. **Controller check.** At boot, TWAI is started once in listen-only mode, with the transceiver still held silent by R1, and stopped again. A failure here is a hardware fault.
+2. **12V supply.** CAN runs only with a 12V supply (6V or more at the divider). On USB alone, the device is on the bench or being flashed, not in a car: the console, BLE and the supply reading all work, but the CAN controller stays off, and the status line and D report say `no 12V`. When 12V arrives, bring-up starts. If it goes away again (switched off with a laptop still plugged in), CAN stops, what was found is forgotten, and the device goes back to WaitingForVehicle. So the switch works as on/off even with USB connected.
+3. **Bit-rate check.** The firmware listens for traffic at 500 kbit/s, then 250 kbit/s, in windows of up to 2 s alternating between the two. The first clean frame at the rate it's listening at confirms that rate, so a live bus is found within milliseconds. Bus errors mean traffic at the other rate, so it switches early, after 200 ms. This step only listens and never transmits.
+4. **Go active.** It restarts TWAI in normal mode at the confirmed rate and drives `CAN_SILENT` low.
+5. **ECU discovery.** It sends Mode 01 PID `0x00` to the functional address `0x7DF` and, as ISO 15765-4 (4.2.2) specifies for a scan tool, collects **every** reply from `0x7E8`–`0x7EF` that arrives within P2 (50 ms). Most cars have more than one ECU that answers, typically the engine on `0x7E8` and the transmission on `0x7E9`, and which answers first varies, so taking only the first reply could pick an ECU with nothing to poll. Each reply is that ECU's support bitmap for PIDs `0x01`–`0x20`.
+6. **Choosing the ECU.** The way python-OBD finds the engine: the ECU on `0x7E8` (ISO 15765-4 recommends `0x7E0`/`0x7E8` for the engine) if it supports RPM or throttle; otherwise the ECU supporting RPM, then throttle, with the most PIDs supported in all. From then on, requests go to that ECU's physical address (response ID − 8, usually `0x7E0`), so only it answers. Any polled channel it doesn't list is dropped, and the log says so. v1's channels are all in the first bitmap's range; reading the later bitmaps (`0x20`, `0x40`, ...) comes with channels that need them. The fake ECU's `SECOND` mode puts a transmission ECU ahead of the engine on the bench.
 
-If no ECU answers discovery, the device goes back to listening and asks again, less and less often: every 5 s for 3 tries, every 30 s for the next 3, then every 2 minutes. A car that has just switched on usually answers within the first few tries. A bus that chatters without ever answering OBD (modules awake in a parked car, or a car that answers only on 29-bit IDs) then sees a request every couple of minutes, not every few seconds, for as long as it chatters (about 35 an hour).
+Discovery is OBD-only (`core/ObdDiscovery.h`). The bus search (`core/BusSearch.h`) only finds the bus, says when it's silent enough for a probe, and notices when it goes quiet; it knows nothing of ECUs. A future CAN tap build, which only listens and decodes broadcast frames, would share the bus search and leave out discovery, probes, polling and every transmit path.
 
-If an ECU answers but supports none of the polled PIDs, the device logs it once, shows it in the D report (`OBD: ECU 0x7E8 supports none of the polled PIDs - not polling`), and stays in WaitingForVehicle without asking again. Polling it would find nothing to ask for, declare the vehicle lost after 2 s and rediscover it, over and over, and on a gatewayed port every rediscovery would reset the probe budget.
+If no ECU answers discovery, or none that answers supports RPM or throttle, the device goes back to listening and asks again, less and less often: every 5 s for 3 tries, every 30 s for the next 3, then every 2 minutes. A car that has just switched on usually answers within the first few tries. A bus that chatters without ever answering OBD (modules awake in a parked car, or a car that answers only on 29-bit IDs) then sees a request every couple of minutes, not every few seconds, for as long as it chatters (about 35 an hour).
 
-Either way, **once the bus goes quiet**, no frames for 10 s, the device takes it that the car has switched off and starts over: the bit-rate check, and discovery from its first interval. (No gateway probes: a bus heard by listening isn't gatewayed.)
+When ECUs answer but none supports a polled PID, the device logs which answered, shows it in the D report (`OBD: answered: 0x7E9 - none supports the polled PIDs, asking again later`), and stays in WaitingForVehicle, asking again on that backoff rather than polling. Polling would find nothing to ask for, declare the vehicle lost after 2 s and rediscover it, over and over.
 
-If step 2 hears nothing, there are two possible reasons: the car is off, or the OBD port is behind a gateway that stays silent until a scan tool asks for something. Gatewayed ports are common from roughly the late 2010s on, the BMW F-series included. The supply voltage is the only hint, and a weak one:
+Either way, **once the bus goes quiet**, no frames for 10 s, the device takes it that the car has switched off and starts over: the bit-rate check, and discovery from its first interval.
+
+If step 3 hears nothing, there are two possible reasons: the car is off, or the OBD port is behind a gateway that stays silent until a scan tool asks for something. Gatewayed ports are common from roughly the late 2010s on, the BMW F-series included. The supply voltage is the only hint, and a weak one:
 
 - **Supply below the probe threshold** (12.4V, set in `Config.h`): the car is treated as off. The device goes to [WaitingForVehicle](#run-states) and keeps listening.
-- **Supply at or above it** for 3 s, with the bus silent at **both** rates (a whole listen window at each, the boot listen included, with no frame and no bus error): the car may be on behind a gateway, so the device makes a **gateway probe**. Silence at both rates means a live bus at the other bit rate is always found first: before this rule, a vehicle lost at 500 kbit/s was followed by a probe within 20 ms, which on the bench went onto a live 250 kbit/s bus.
+- **Supply at or above it** for 3 s, with the bus silent at **both** rates (a whole listen window at each, with no frame and no bus error): the car may be on behind a gateway, so the device makes a **gateway probe**. Silence at both rates means a live bus at the other bit rate is always found first, so a probe never goes onto a bus running at the other rate.
   1. It drives `CAN_SILENT` low and starts TWAI in normal mode at the probe rate, 500 kbit/s (set in `Config.h`). Nearly every gatewayed car uses that rate.
   2. It sends one Mode 01 PID `0x00` request to `0x7DF` as a **single-shot** frame. The controller doesn't retransmit it, so a wrong rate produces at most one bad frame.
-  3. A valid reply within the 50 ms timeout confirms the rate, and bring-up continues at step 3.
+  3. A valid reply within 1 s confirms the rate, and bring-up continues at step 4. That's longer than the 50 ms ISO 15765-4 allows an ECU: a gateway passing the request on may answer later, and waiting costs nothing.
   4. Otherwise it stops TWAI, releases `CAN_SILENT`, logs the result ("no acknowledgement", "acknowledged, no reply" or "controller error"), and keeps listening in WaitingForVehicle.
-  5. It doesn't probe again for 30 seconds, and stops probing after 5 failed tries until the next boot. A car that never answers sees at most 5 single frames per power cycle.
-- **Never once the bus has been heard by listening** in this boot: a port whose traffic can be heard isn't gatewayed, so it never needs a probe, and a car that goes quiet afterwards (switched off) is never sent one at the wrong rate. (A probe's answer doesn't count as hearing the bus, so a gatewayed car keeps its probes.)
+  5. It probes again every 10 s for as long as the bus stays silent and the supply stays up. There's no cap, so a car started at any time is found: a parked car that never answers sees one frame every 10 s until the device sleeps, 5 minutes after parking, and wake checks only listen.
+- **Having heard the bus earlier doesn't rule a probe out.** Some gatewayed ports carry traffic only for a few seconds after a diagnostic request, then fall silent until asked again (see the [car-test results](car-test.md#results-hyundai-santa-cruz-2026-11-25)). Silence at both rates is the only condition, since it's what keeps a probe off a live bus at the other rate.
 
-Neither the probe nor discovery waits inside a job. Each sends its request and returns. Later `can` runs, every 10 ms, check whether the controller has reported the frame sent, take the reply when it arrives, or give up at the timeout. Until the step finishes, the rate check and probe policy stay paused. The first bench test of the blocking version showed why this matters: an unanswered probe held the loop for 50 ms, and BLE, the LED and the console all waited behind it.
+Neither the probe nor discovery waits inside a job. Each sends its request and returns. Later `can` runs, every 10 ms, check whether the controller has reported the frame sent, take the replies as they arrive, or give up at the timeout. Until the step finishes, the rate check and probe policy stay paused. Waiting inside the job would hold BLE, the LED and the console for the whole timeout.
 
-**Why 12.4V and not the 13.2V engine-running threshold.** Many modern cars, the BMW F-series among them, use intelligent alternator control: the alternator often stops charging while the engine runs, and the supply sits around 12.4–12.8V. A 13.2V trigger would miss those cars. The cost is that a healthy parked battery (about 12.6–12.8V) also passes, so a parked gatewayed car can see a probe. The limit of 5 single frames per boot is what bounds that. The first car test logs the supply with the engine running, so the threshold can be adjusted to suit.
-
-A gatewayed car with the ignition on but the engine off won't be found, because its voltage looks parked. Starting the engine brings it up. That's an acceptable limit for v1.
+**Why 12.4V and not the 13.2V engine-running threshold.** Many modern cars, the BMW F-series among them, use intelligent alternator control: the alternator often stops charging while the engine runs, and the supply sits around 12.4–12.8V. A 13.2V trigger would miss those cars. The cost is that a healthy parked battery (about 12.6–12.8V) also passes, so a parked gatewayed car can see probes, one every 10 s until the device sleeps. A voltage log of a drive ([car-test.md](car-test.md)) will show whether it needs adjusting.
 
 ### Polling
 
 - **One request in flight.** The poller sends a request and waits for its reply or for the 50 ms timeout (the ISO 15765-4 P2 limit) before sending the next. It never blocks: the `can` job runs every 10 ms, takes any reply, and sends the next request. That caps polling at about 100 requests per second, above what most cars answer; a faster job period is the change if a car ever outruns it.
-- **A slow ECU.** One that answers later than the 50 ms timeout still gets polled: the device asks again, and a late reply that arrives while the same PID is in flight is taken as its answer, so data keeps coming at a few hertz rather than not at all. On the bench, a 60 ms ECU gave about 3 Hz per channel with three requests in four timing out, and never counted as lost. ISO 15765-4 requires 50 ms, so this shouldn't happen on a real car; if one does answer slowly, a longer timeout (100 ms) would give it much more throughput.
-- **Vehicle lost.** No reply on any channel for 2 seconds: the device logs it, goes back to listening, and returns to WaitingForVehicle. Finding a vehicle resets the gateway probe budget, so a gatewayed car that comes back later in the same boot can be found again.
+- **A slow ECU.** One that answers later than the 50 ms timeout still gets polled: the device asks again, and a late reply that arrives while the same PID is in flight is taken as its answer, so data keeps coming at a few hertz rather than not at all. A 60 ms ECU gives about 3 Hz per channel, with three requests in four timing out, and is never counted as lost. ISO 15765-4 requires 50 ms, so this shouldn't happen on a real car; if one does answer slowly, a longer timeout (100 ms) would give it much more throughput.
+- **Vehicle lost.** No reply on any channel for 2 seconds: the device logs it, goes back to listening, and returns to WaitingForVehicle. If the port then falls silent, probes start again as soon as it has been silent at both rates.
 - **Throughput is shared.** A car typically answers 20–60 single-PID requests per second. Every polled PID takes a share of that, so 20 Hz of real data for every channel isn't possible on most cars.
 - **Tiered schedule.** Each channel has a target rate, and the poller picks whichever channel is most overdue relative to its own target. v1's two channels both aim for 25 Hz. As channels are added, fast ones such as RPM, throttle and speed get most of the budget, and slow ones such as temperatures about 1 Hz. The status line shows the rate each one actually gets.
 - **Bus-off.** Not handled on its own: a controller that goes bus-off stops getting replies, so after 2 s the vehicle-lost path restarts it in listen-only mode.
@@ -253,7 +254,8 @@ The device goes into ESP32-C6 deep sleep with a timer wake. Each wake runs a qui
 
 - **Parked:** no fresh RPM, the supply below the engine-running level (13.2V), and no CAN frame for 10 s, all held continuously for 5 minutes. A connected client doesn't keep the device awake: a phone left in the car would otherwise hold it at full current indefinitely.
 - **Low-voltage cutoff:** the supply below 11.8V for 5 s, timed by the sleep logic itself so it applies straight after boot too (a boot during a cranking dip, or while a supply ramps up, doesn't sleep on its first reading). It sleeps without the 5-minute hold or a silent bus, unless fresh RPM says the engine is running: with the engine running, the device's few milliamps don't matter next to the car's own load (a failing alternator, say), and logging continues.
-- **Never on USB power alone.** Below 6V the regulator can't run the XIAO, so the device must be on USB with no 12V connected: there's no battery to protect, and it stays awake for a bench session or a flash. A wake check that reads below 6V boots fully, and the D report says `Sleep: off - supply below 6V, running from USB`. Found on the bench, where a board on USB alone went to sleep for the cutoff and couldn't stay awake.
+- **Not in the first 30 s after the supply arrives**, at power-up or when switched on with USB already connected. The supply level lags the voltage by its hold times, so after 0V on USB it can still say "below cutoff" for a few seconds at 14V, and the car's voltage may still be ramping.
+- **Never on USB power alone.** Below 6V the regulator can't run the XIAO, so the device must be on USB with no 12V connected: there's no battery to protect, and it stays awake for a bench session or a flash. A wake check that reads below 6V boots fully, and the D report says `Sleep: off - supply below 6V, running from USB`.
 - **Not while `W` is on.** The console's `W` keeps the device awake until `W` again or a restart, so a bench session with a laptop attached isn't interrupted. It's off at every boot.
 
 Going to sleep logs a `Sleep:` line, stops the CAN controller (the transceiver stays silent), turns off the LED and BLE, and sleeps for the check interval: **30 s** when parked, **10 minutes** after the cutoff.
@@ -265,7 +267,7 @@ Going to sleep logs a `Sleep:` line, stops the CAN controller (the transceiver s
 - **The supply has risen 0.3V or more above the lowest wake-check reading since the device went to sleep:** the alternator has started charging. This catches a gatewayed car with intelligent alternator control, which can run at 12.4–12.8V with a silent OBD bus and so look parked. The baseline is the lowest reading, so a battery's surface charge decaying after a drive never looks like a rise.
 - **The supply is below 6V:** no 12V, so the device is on USB (see above).
 
-Otherwise it sleeps again. A full boot after a wake logs `Sleep: woke after N checks …` with the reason, and from then on behaves like any boot. That includes gateway probes, unless the bus is heard by listening: a probe is useful exactly when a check has seen signs the car is awake, as with a gatewayed car whose supply has risen.
+Otherwise it sleeps again. A full boot after a wake logs `Sleep: woke after N checks …` with the reason, and from then on behaves like any boot. That includes gateway probes: a probe is useful exactly when a check has seen signs the car is awake, as with a gatewayed car whose supply has risen.
 
 **A check reads higher than the awake device.** On the bench, a check read 0.05–0.15V above the awake reading at the same supply, most likely because the awake device draws more (BLE on), which shifts the reading. Two things allow for it:
 
@@ -300,7 +302,7 @@ Table order is priority, as in Gnimu: draining the bus comes first.
 
 Same port, baud and commands as Gnimu: `D` report, `C` clear counters, `V` version and config, `L` status line, a number for N status lines, `R` restart. Plus `P`, which prints the BLE protocol setup, and `W`, which keeps the device awake (no sleep) until `W` again or a restart.
 
-**Console output never blocks.** The console is the C6's built-in USB serial port. With a cable attached but no terminal reading, its transmit buffer fills, and by default every write then waits 100 ms for room, which stalls the whole loop: polling, BLE frames, everything. The firmware sets the port's transmit timeout to 0 (`Serial.setTxTimeoutMs(0)`), so output nobody is reading is dropped instead. Found on the bench with `board_check`, whose LED froze whenever USB was connected without a monitor open.
+**Console output never blocks.** The console is the C6's built-in USB serial port. With a cable attached but no terminal reading, its transmit buffer fills, and by default every write then waits 100 ms for room, which stalls the whole loop: polling, BLE frames, everything. The firmware sets the port's transmit timeout to 0 (`Serial.setTxTimeoutMs(0)`), so output nobody is reading is dropped instead.
 
 Boot log in the same style:
 
@@ -309,26 +311,26 @@ BUILD,version=0.1.0,revision=...,utc=...,target=esp32c6
 Device ID: 0301821570
 Config: hardware 12v, vehicle obd2, CAN auto 500/250 kbit/s, gateway probe at 12.40V
 Config: BLE "Gnimu-CAN 0301821570", Gnimu frame v1, 140 bytes at 20 Hz
-Config: supply calibration 1.010, engine running 13.20V, cutoff 11.80V
+Config: supply calibration 1.028, engine running 13.20V, cutoff 11.80V
 Gnimu-CAN starting
 Reset: power-on
 Watchdog: 5000 ms ✅
 Supply: 14.20V, engine running
 CAN: controller started, listen-only ✅
-CAN: bus heard by listening - no gateway probes this boot
 CAN: traffic at 500 kbit/s ✅
 BLE: advertising as "Gnimu-CAN 0301821570" ✅
 Job can: every 10000 us, budget 2000 us
 ...
 Waiting for vehicle.
 Commands end with Enter: ...
-OBD: ECU 0x7E8 answered, polling via 0x7E0 ✅
+OBD: answered: 0x7E8, 0x7E9
+OBD: ECU 0x7E8 chosen, polling via 0x7E0 ✅
 OBD: PID 0C RPM supported ✅
 OBD: PID 11 Throttle supported ✅
 Vehicle: engine running
 ```
 
-The `D` report adds CAN and OBD lines to Gnimu's job table: bus state and error counters, the ECU being polled, and for each channel its latest value with its request, reply and timeout counts, or that the ECU supports none of the polled PIDs, then the [vehicle activity](#vehicle-activity), and a `Sleep:` line: whether the parked conditions hold and for how long, that `W` is keeping it awake, or that it's on USB alone, and how many times it has slept since power-up. After a wake, a second `Sleep:` line gives the reason, the number of checks, the voltage it went to sleep at and the range the checks read. The status line shows the state, the supply voltage, each channel's value and reply rate (replies per second since the previous line), the vehicle activity, and the subscribed client's packet rate.
+The `D` report adds CAN and OBD lines to Gnimu's job table: bus state and error counters, the ECU being polled and every ECU that answered discovery, and for each channel its latest value with its request, reply and timeout counts, or that the ECU supports none of the polled PIDs, then the [vehicle activity](#vehicle-activity), and a `Sleep:` line: whether the parked conditions hold and for how long, that `W` is keeping it awake, or that it's on USB alone, and how many times it has slept since power-up. After a wake, a second `Sleep:` line gives the reason, the number of checks, the voltage it went to sleep at and the range the checks read. The status line shows the state, the supply voltage, `CAN: off, no 12V` on USB alone, each channel's value and reply rate (replies per second since the previous line), the vehicle activity, and the subscribed client's packet rate.
 
 The status LED is the XIAO's single yellow LED, so it shows patterns only, like Gnimu's ESP32 build:
 
@@ -343,7 +345,7 @@ The status LED is the XIAO's single yellow LED, so it shows patterns only, like 
 
 ## Testing
 
-- **Host tests** (`tests/run.sh`) for `core/`: the scheduler, rate tracking, device ID, console input, the supply monitor, the state machine, the LED patterns, the report, status-line and JSON text, OBD request encoding and reply parsing (including the malformed and wrong-ECU cases), the probe policy, the bus search (including the bench-found probe cases), the poller (one in flight, timeouts, support bitmap, rate shares), vehicle activity, and the sleep policy and wake check. Each runs plain and under AddressSanitizer and UndefinedBehaviorSanitizer.
+- **Host tests** (`tests/run.sh`) for `core/`: the scheduler, rate tracking, device ID, console input, the supply monitor, the state machine, the LED patterns, the report, status-line and JSON text, OBD request encoding and reply parsing (including the malformed and wrong-ECU cases), the probe policy and two-frame probe, the bus search (including the bench-found probe cases), discovery (including the transmission answering first), the poller (one in flight, timeouts, support bitmap, rate shares), vehicle activity, and the sleep policy and wake check. Each runs plain and under AddressSanitizer and UndefinedBehaviorSanitizer.
 - **Build checks** with warnings as errors in the project's own code, as in Gnimu.
 - **On hardware**: everything on the [bench rig](#bench-rig), then the car itself: the bit-rate check or gateway probe, poll throughput, sleep and wake timings, and timing under load from the diagnostics job table ([car-test.md](car-test.md)).
 
@@ -353,8 +355,8 @@ Two breadboards, joined by a CAN_H/CAN_L/GND pair:
 
 - **Device:** a XIAO ESP32C6 and a CAN Pal wired as on the 12V carrier, with R1 on `CAN_SILENT` and the ÷11 divider on A0. An adjustable bench supply (0–30V) on the 12V input powers it through the buck regulator and plays the car's voltage: about 12.4V parked, about 14.2V engine running, below 11.8V for the low-voltage cutoff, and anything in between to test the transitions. Set its current limit to about 150–200 mA. Keep below about 16V if the TVS diode (D1) is fitted, since it starts conducting around 17V. Keep the Schottky diode (D2) between the regulator and the XIAO's 5V pin: the USB cable for the console will be plugged in at the same time.
 
-  **Connect USB before turning the supply on.** The XIAO's 5V pin is the USB connector's VBUS line, so with the supply on, about 4.8V sits on VBUS before a cable is attached. A USB-C host (such as a MacBook) checks that VBUS is at 0V before it attaches, sees the voltage, and doesn't enumerate the board. In the other order it attaches normally and stays attached. A USB-A port or hub doesn't make that check. Found on the bench: the board appeared the moment the supply was switched off. The same applies to the 12V carrier if a USB-C cable is plugged into a board already running from the car.
-- **Fake ECU:** a second XIAO ESP32C6 and CAN Pal running a small sketch (`tools/fake_ecu/`) that answers Mode 01 requests on `0x7E8` with changing RPM and throttle values. It has settings for a reply delay, so it can stand in for slow or fast ECUs, for staying silent until asked, like a gatewayed port, for supporting neither RPM nor throttle (`HIDE`), and for chattering without answering OBD at all (`MUTE`). If its controller goes bus-off (it can, when its bit rate is changed while the device is still active at the old one), it restarts it by itself. It runs from the USB-C or from the 5V supply from the Gnimu-CAN breadboard that has an in-line Schottky diode (a 1N5819, like D2), so it's safe to have its USB cable plugged in too. It has no voltage divider or buck regulator.
+  **Connect USB before turning the supply on.** The XIAO's 5V pin is the USB connector's VBUS line, so with the supply on, about 4.8V sits on VBUS before a cable is attached. A USB-C host (such as a MacBook) checks that VBUS is at 0V before it attaches, sees the voltage, and doesn't enumerate the board. In the other order it attaches normally and stays attached. A USB-A port or hub doesn't make that check. The same applies to the 12V carrier if a USB-C cable is plugged into a board already running from the car. CAN runs only once the supply is on: on USB alone the device keeps CAN off, so a fake ECU test needs the bench supply.
+- **Fake ECU:** a second XIAO ESP32C6 and CAN Pal running a small sketch (`tools/fake_ecu/`) that answers Mode 01 requests on `0x7E8` with changing RPM and throttle values. It has settings for a reply delay, so it can stand in for slow or fast ECUs, for staying silent until asked, like a gatewayed port, for a transmission ECU that answers first without RPM or throttle (`SECOND`), for supporting neither RPM nor throttle (`HIDE`), and for chattering without answering OBD at all (`MUTE`). If its controller goes bus-off (it can, when its bit rate is changed while the device is still active at the old one), it restarts it by itself. It runs from the USB-C or from the 5V supply from the Gnimu-CAN breadboard that has an in-line Schottky diode (a 1N5819, like D2), so it's safe to have its USB cable plugged in too. It has no voltage divider or buck regulator.
 - **Termination:** both CAN Pals' termination switches **on** for the bench, so the bus has a 120Ω end on each side as a car does. Both must be **off** before either is used in a car.
 
 Without the fake ECU, the device alone still exercises boot, states, voltage sense, BLE and, with the supply at or above the 12.4V probe threshold, the gateway probe's failure path (no node to acknowledge it). With it, the whole OBD path can be tested: discovery, the gateway probe's success path, polling rates and the diagnostics.

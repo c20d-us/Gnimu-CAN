@@ -55,14 +55,14 @@ App::App()
       supply_({board::kSupplyDivider, config::kSupplyCalibration, config::kSupplyEmaAlpha,
                config::kEngineRunningV, config::kLowVoltageCutoffV, config::kSupplyRunningHoldMs,
                config::kSupplyCutoffHoldMs}),
-      probe_({config::kGatewayProbeMinV, config::kProbeHoldMs, config::kProbeBackoffMs,
-              config::kProbeMaxAttempts}),
-      search_({config::kCanRateWindowMs, config::kBusSilentMs,
-               {config::kDiscoveryRetryMs, config::kDiscoveryBackoffMs, config::kDiscoveryMaxBackoffMs,
-                config::kDiscoveryTriesPerStep}}),
+      probe_({config::kGatewayProbeMinV, config::kProbeHoldMs, config::kProbeIntervalMs}),
+      search_({config::kCanRateWindowMs, config::kBusSilentMs}),
+      discovery_({config::kObdReplyTimeoutMs,
+                  {config::kDiscoveryRetryMs, config::kDiscoveryBackoffMs, config::kDiscoveryMaxBackoffMs,
+                   config::kDiscoveryTriesPerStep}}),
       poller_(kPollPids, kPollPeriodsMs, config::kObdReplyTimeoutMs),
       sleepPolicy_({config::kSleepAfterParkedS * 1000, config::kBusSilentMs, config::kSupplyCutoffHoldMs,
-                    config::kNoSupplyV}),
+                    config::kNoSupplyV, config::kSleepGraceMs}),
       statusLed_({config::kLedBlinkHalfMs, config::kLedFaultHalfMs, config::kLedFlashOnMs,
                   config::kLedFlashPeriodMs}),
       diagnostics_(console_, scheduler_.jobs(), scheduler_.allStats(), kJobs, loops_, machine_, supply_,
@@ -194,37 +194,44 @@ void App::setJobs(const JobSet& j) {
 }
 
 bool App::startCan() {
-  canSummary_.maxProbes = config::kProbeMaxAttempts;
+  canSummary_.noSupply = true;  // until canJob() sees 12V
   CanPort::init();
-  // The rate check only ever listens: the transceiver stays silent, and the
-  // controller doesn't even acknowledge frames.
-  const uint32_t rates[] = {500000, 250000};
-  for (uint32_t rate : rates) {
-    if (!CanPort::start(rate, true)) {
-      console_.log("CAN: controller failed to start \xE2\x9D\x8C");
-      return false;
-    }
-    const uint32_t startMs = nowMs();
-    uint32_t frames = 0;
-    CanFrame f;
-    while (nowMs() - startMs < config::kCanBootListenMs) {
-      while (CanPort::receive(f)) frames++;
-      delay(5);
-    }
-    canSummary_.framesSeen += frames;
-    const bool clean = CanPort::status().busErrors == 0;
-    search_.bootListen(rate, frames, clean, nowMs());
-    if (frames > 0 && clean) {
-      console_.log("CAN: controller started, listen-only \xE2\x9C\x85");
-      confirmTraffic(rate, true);
-      return true;
-    }
-    Watchdog::feed();
+  // Only a check that the controller starts (a hardware fault otherwise). The
+  // search for the bus begins in canJob() once there's a 12V supply.
+  if (!CanPort::start(500000, true)) {
+    console_.log("CAN: controller failed to start \xE2\x9D\x8C");
+    return false;
   }
-  console_.log("CAN: controller started, listen-only \xE2\x9C\x85");
-  console_.log("CAN: no traffic at 500 or 250 kbit/s - waiting for the vehicle");
-  listenAt(500000);
+  CanPort::stop();
+  console_.log("CAN: controller ok \xE2\x9C\x85");
+  if (!hasSupply()) console_.log("CAN: no 12V supply (USB alone) - off until it arrives");
   return true;
+}
+
+bool App::hasSupply() const {
+  const SupplyStatus& s = supply_.status();
+  return s.valid && s.volts >= config::kNoSupplyV;
+}
+
+void App::canOn() {
+  canOn_ = true;
+  canSummary_.noSupply = false;
+  console_.log("CAN: 12V supply - looking for the vehicle at 500 and 250 kbit/s");
+  listenAt(500000);
+}
+
+void App::canOff() {
+  canOn_ = false;
+  canSummary_.noSupply = true;
+  step_ = CanStep::Idle;
+  CanPort::stop();
+  search_.restart();
+  canSummary_.trafficBitrate = 0;
+  obdSummary_.ecuFound = false;
+  obdSummary_.nothingToPoll = false;
+  obdSummary_.answeredEcus = 0;
+  console_.log("CAN: no 12V supply - off until it returns");
+  apply(machine_.vehicleLost());
 }
 
 void App::listenAt(uint32_t bitrate) {
@@ -232,11 +239,11 @@ void App::listenAt(uint32_t bitrate) {
   search_.listen(bitrate, nowMs());
 }
 
-void App::confirmTraffic(uint32_t bitrate, bool byListening) {
-  // Discovery starts straight away (search_.next() says Discover).
-  const bool firstHeard = search_.confirmed(bitrate, byListening, nowMs());
+void App::confirmTraffic(uint32_t bitrate) {
+  // Discovery starts straight away (canJob() asks once discovery_ is due).
+  search_.confirmed(bitrate);
+  discovery_.restart(nowMs());
   canSummary_.trafficBitrate = bitrate;
-  if (firstHeard && !probe_.exhausted()) console_.log("CAN: bus heard by listening - no gateway probes this boot");
   if (CanPort::status().bitrate != bitrate || !CanPort::status().listenOnly) CanPort::start(bitrate, true);
   console_.log("CAN: traffic at %lu kbit/s \xE2\x9C\x85", static_cast<unsigned long>(bitrate / 1000));
 }
@@ -246,61 +253,55 @@ void App::discover() {
   // car answered, so transmitting at it is safe.
   const uint32_t now = nowMs();
   CanPort::start(search_.trafficRate(), false);
-  stepReplied_ = false;
   step_ = CanStep::Discovering;
-  stepStartMs_ = now;
-  if (!CanPort::send(obd2::mode01Request(0x00))) finishDiscovery(false, now);
+  discovery_.begin(now);
+  // Not queued: the round ends at once with no replies, and backs off.
+  if (!CanPort::send(obd2::mode01Request(0x00))) finishDiscovery(now);
 }
 
-void App::finishDiscovery(bool answered, uint32_t now) {
+void App::finishDiscovery(uint32_t now) {
   step_ = CanStep::Idle;
   const uint32_t rate = search_.trafficRate();
-  if (!answered) {
-    const uint32_t waitMs = search_.discoveryFailed(now);
+  const EcuChoice c = discovery_.finish(kPollPids, kPollChannels, now);
+  obdSummary_.answeredEcus = c.answered;
+  if (c.answered == 0) {
     console_.log("OBD: no ECU answered at %lu kbit/s (try %lu) - asking again in %lu s",
-                 static_cast<unsigned long>(rate / 1000), static_cast<unsigned long>(search_.failures()),
-                 static_cast<unsigned long>(waitMs / 1000));
+                 static_cast<unsigned long>(rate / 1000), static_cast<unsigned long>(discovery_.failures()),
+                 static_cast<unsigned long>(discovery_.retryInMs() / 1000));
     CanPort::start(rate, true);
     return;
   }
+  char ids[obd2::kResponseIdsTextMax];
+  obd2::formatResponseIds(ids, sizeof(ids), c.answered);
+  console_.log("OBD: answered: %s", ids);
 
-  const obd2::Mode01Reply& reply = stepReply_;
-  const uint32_t bitmap = (static_cast<uint32_t>(reply.data[0]) << 24) | (static_cast<uint32_t>(reply.data[1]) << 16) |
-                          (static_cast<uint32_t>(reply.data[2]) << 8) | reply.data[3];
-  const uint32_t responseId = obd2::kFirstResponseId + reply.ecu;
+  if (!c.chosen) {
+    // Nothing to ask for: stay waiting, and ask again after the backoff.
+    console_.log("OBD: no ECU supports the polled PIDs (try %lu) - asking again in %lu s \xE2\x9D\x8C",
+                 static_cast<unsigned long>(discovery_.failures()),
+                 static_cast<unsigned long>(discovery_.retryInMs() / 1000));
+    CanPort::start(rate, true);
+    obdSummary_.nothingToPoll = true;
+    return;
+  }
+
+  const uint32_t responseId = obd2::kFirstResponseId + c.ecu;
   // An ECU's physical request ID is its response ID minus 8.
   const uint32_t requestId = responseId - 8;
-  poller_.start(requestId, bitmap, now);
-  bool anySupported = false;
-  for (size_t i = 0; i < kPollChannels; i++) anySupported = anySupported || poller_.channel(i).supported;
-  search_.ecuFound(anySupported);
-  if (anySupported) {
-    console_.log("OBD: ECU 0x%03lX answered, polling via 0x%03lX \xE2\x9C\x85", static_cast<unsigned long>(responseId),
-                 static_cast<unsigned long>(requestId));
-  } else {
-    console_.log("OBD: ECU 0x%03lX answered", static_cast<unsigned long>(responseId));
-  }
+  poller_.start(requestId, c.bitmap, now);
+  console_.log("OBD: ECU 0x%03lX chosen, polling via 0x%03lX \xE2\x9C\x85", static_cast<unsigned long>(responseId),
+               static_cast<unsigned long>(requestId));
   for (size_t i = 0; i < kPollChannels; i++) {
-    const PollChannel& c = poller_.channel(i);
-    console_.log("OBD: PID %02X %s %s", static_cast<unsigned>(c.pid), kPollNames[i],
-                 c.supported ? "supported \xE2\x9C\x85" : "not supported - not polled \xE2\x9D\x8C");
-  }
-  if (!anySupported) {
-    // Nothing to ask for: stay waiting, ask no more until the bus goes quiet
-    // (search_.ecuFound), and leave the probe budget alone.
-    console_.log("OBD: ECU 0x%03lX supports none of the polled PIDs - not polling \xE2\x9D\x8C",
-                 static_cast<unsigned long>(responseId));
-    CanPort::start(search_.trafficRate(), true);
-    obdSummary_.nothingToPoll = true;
-    obdSummary_.responseId = responseId;
-    obdSummary_.requestId = requestId;
-    return;
+    const PollChannel& ch = poller_.channel(i);
+    console_.log("OBD: PID %02X %s %s", static_cast<unsigned>(ch.pid), kPollNames[i],
+                 ch.supported ? "supported \xE2\x9C\x85" : "not supported - not polled \xE2\x9D\x8C");
   }
   obdSummary_.ecuFound = true;
   obdSummary_.nothingToPoll = false;
   obdSummary_.responseId = responseId;
   obdSummary_.requestId = requestId;
-  // A car that comes back later in this boot gets the full probe budget.
+  // The probe count starts over; if the car is lost later, the first probe
+  // may go as soon as the bus is silent.
   probe_.reset();
   canSummary_.probes = 0;
   canSummary_.lastProbe = ProbeResult::None;
@@ -310,7 +311,6 @@ void App::finishDiscovery(bool answered, uint32_t now) {
 // One run's worth of the request in progress: takes a reply the drain loop
 // found, or moves on when the controller reports, or times out.
 void App::continueStep(uint32_t now) {
-  const uint32_t elapsed = now - stepStartMs_;
   switch (step_) {
     case CanStep::Idle:
       return;
@@ -324,7 +324,7 @@ void App::continueStep(uint32_t now) {
       if (tx == TxOutcome::Sent) {
         step_ = CanStep::ProbeWaiting;
         stepStartMs_ = now;
-      } else if (tx == TxOutcome::Failed || elapsed >= config::kProbeTxConfirmMs) {
+      } else if (tx == TxOutcome::Failed || now - stepStartMs_ >= config::kProbeTxConfirmMs) {
         finishProbe(ProbeResult::NoAck);
       }
       return;
@@ -332,16 +332,12 @@ void App::continueStep(uint32_t now) {
     case CanStep::ProbeWaiting:
       if (stepReplied_) {
         finishProbe(ProbeResult::Answered);
-      } else if (elapsed >= config::kProbeReplyMs) {
+      } else if (now - stepStartMs_ >= config::kProbeReplyMs) {
         finishProbe(ProbeResult::NoReply);
       }
       return;
     case CanStep::Discovering:
-      if (stepReplied_) {
-        finishDiscovery(true, now);
-      } else if (elapsed >= config::kObdReplyTimeoutMs) {
-        finishDiscovery(false, now);
-      }
+      if (discovery_.collected(now)) finishDiscovery(now);
       return;
   }
 }
@@ -361,6 +357,7 @@ void App::trafficStopped() {
                static_cast<unsigned long>(config::kBusSilentMs / 1000));
   canSummary_.trafficBitrate = 0;
   obdSummary_.nothingToPoll = false;
+  obdSummary_.answeredEcus = 0;
   search_.quiet();
   listenAt(search_.rate());
 }
@@ -407,14 +404,13 @@ void App::finishProbe(ProbeResult r) {
   probe_.record(r, nowMs());
   canSummary_.probes = probe_.attempts();
   canSummary_.lastProbe = r;
-  console_.log("CAN: gateway probe %u of %u at %lu kbit/s: %s%s", static_cast<unsigned>(probe_.attempts()),
-               static_cast<unsigned>(config::kProbeMaxAttempts), static_cast<unsigned long>(rate / 1000),
-               probeResultText(r), r == ProbeResult::Answered ? " \xE2\x9C\x85" : "");
+  console_.log("CAN: gateway probe %lu at %lu kbit/s: %s%s", static_cast<unsigned long>(probe_.attempts()),
+               static_cast<unsigned long>(rate / 1000), probeResultText(r),
+               r == ProbeResult::Answered ? " \xE2\x9C\x85" : "");
   if (r == ProbeResult::Answered) {
-    confirmTraffic(rate, false);
+    confirmTraffic(rate);
     return;
   }
-  if (probe_.exhausted()) console_.log("CAN: no more gateway probes until the next boot");
   listenAt(search_.rate());
 }
 
@@ -440,6 +436,14 @@ void App::tick() {
 // and makes gateway probes when the policy allows; then asks for an ECU.
 void App::canJob() {
   const uint32_t now = nowMs();
+  // No 12V: on USB alone, on the bench or being flashed, not in a car. CAN
+  // stays off until the supply arrives, and goes off again if it leaves.
+  if (!hasSupply()) {
+    if (canOn_) canOff();
+    refreshObdSummary(now);
+    return;
+  }
+  if (!canOn_) canOn();
   const bool polling = machine_.state() == RunState::Polling;
   CanFrame f;
   while (CanPort::receive(f)) {
@@ -447,11 +451,15 @@ void App::canJob() {
     search_.frame(now);
     if (polling) {
       poller_.onFrame(f, now);
-    } else if (step_ != CanStep::Idle && !stepReplied_) {
+    } else if (step_ != CanStep::Idle) {
       obd2::Mode01Reply r;
       if (obd2::parseMode01Reply(f, 0x00, r) && r.len == 4) {
-        stepReplied_ = true;
-        stepReply_ = r;
+        if (step_ == CanStep::Discovering) {
+          discovery_.reply(r.ecu, (static_cast<uint32_t>(r.data[0]) << 24) | (static_cast<uint32_t>(r.data[1]) << 16) |
+                                      (static_cast<uint32_t>(r.data[2]) << 8) | r.data[3]);
+        } else {
+          stepReplied_ = true;
+        }
       }
     }
   }
@@ -477,18 +485,17 @@ void App::canJob() {
   const bool clean = search_.trafficRate() != 0 || CanPort::status().busErrors == 0;
   switch (search_.next(now, clean, probe_.due(search_.probeSilence(), now))) {
     case BusAction::None:
+      // Traffic confirmed: the OBD side asks for its ECUs when due.
+      if (search_.trafficRate() != 0 && discovery_.due(now)) discover();
       break;
     case BusAction::Confirm:
-      confirmTraffic(search_.rate(), true);
+      confirmTraffic(search_.rate());
       break;
     case BusAction::Probe:
       makeProbe();
       break;
     case BusAction::NextWindow:
       listenAt(BusSearch::otherRate(search_.rate()));
-      break;
-    case BusAction::Discover:
-      discover();
       break;
     case BusAction::Quiet:
       // The car has switched off: start over, rather than keep asking a bus
