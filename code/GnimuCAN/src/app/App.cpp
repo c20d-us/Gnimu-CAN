@@ -11,6 +11,7 @@
 #include "../core/ConsoleHelp.h"
 #include "../core/DeviceId.h"
 #include "../core/Obd2.h"
+#include "../core/Report.h"
 #include "../core/TextOut.h"
 #include "../platform/Board.h"
 #include "../platform/CanPort.h"
@@ -44,6 +45,7 @@ constexpr size_t kChannels = config::kObdChannelCount;
 struct PollTable {
   PollChannelConfig channels[kChannels];
   const obd2::PidDecoder* decoders[kChannels];
+  const obd2::PidDecoder* alts[kChannels];  // the second-choice PID's decoder, or nullptr
   bool fills[kChannels];      // fills its frame field (helpers don't)
   size_t minus[kChannels];    // the helper channel subtracted; kChannels for none
   uint8_t wanted[kChannels];  // enabled PIDs in table order: what discovery looks for
@@ -58,14 +60,15 @@ const PollTable& pollTable() {
     for (size_t h = 0; h < obd2::kHelperDecoderCount; h++) {
       const size_t i = config::kObdPollCount + h;
       p.decoders[i] = &obd2::kHelperDecoders[h];
-      p.channels[i] = {obd2::kHelperDecoders[h].pid, 0, obd2::bytesNeeded(obd2::kHelperDecoders[h])};
+      p.channels[i] = {obd2::kHelperDecoders[h].pid, 0, obd2::kHelperDecoders[h].length};
       p.minus[i] = kChannels;
     }
     for (size_t i = 0; i < config::kObdPollCount; i++) {
       const obd2::PidDecoder* d = obd2::decoderFor(config::kObdPolls[i].field);
       const uint32_t period = config::kObdPolls[i].periodMs;
       p.decoders[i] = d;
-      p.channels[i] = {d->pid, period, obd2::bytesNeeded(*d)};
+      p.alts[i] = obd2::altFor(d->field);
+      p.channels[i] = {d->pid, period, d->length};
       p.fills[i] = true;
       p.minus[i] = kChannels;
       if (period > 0) p.wanted[p.wantedCount++] = d->pid;
@@ -111,7 +114,9 @@ App::App()
       // jitter can't make a request wait a whole extra tick.
       poller_(pollTable().channels, {config::kObdReplyTimeoutMs, 1000 / config::kMaxObdRequestsPerSec - 1,
                                      config::kSilentAfterTimeouts, config::kSilentRetryMs,
-                                     config::kAskEveryoneAfterTimeouts}),
+                                     config::kAskEveryoneAfterTimeouts, config::kObdCycleMs,
+                                     static_cast<uint8_t>(config::kObdMaxPidsPerRequest),
+                                     config::kBundleFallBackAfter}),
       sleepPolicy_({config::kSleepAfterParkedS * 1000, config::kBusSilentMs, config::kSupplyCutoffHoldMs,
                     config::kNoSupplyV, config::kSleepGraceMs}),
       statusLed_({config::kLedBlinkHalfMs, config::kLedFaultHalfMs, config::kLedFlashOnMs,
@@ -120,6 +125,13 @@ App::App()
                    canSummary_, obdSummary_, sleepView_, ble_, deviceId_, reset_) {
   // Here, not in the class: GCC only evaluates it once App is complete.
   static_assert(jobSpecsValid(kJobSpecs), "job specs out of id order, unnamed, or with a zero period");
+  for (size_t i = 0; i < kChannels; i++) {
+    const obd2::PidDecoder* alt = pollTable().alts[i];
+    if (alt) poller_.setAlternate(i, alt->pid, alt->length);
+  }
+  // Before falling back to one PID per request, RPM alone says whether the
+  // engine is running.
+  if (pollTable().rpm < kChannels) poller_.setCheckChannel(pollTable().rpm);
 }
 
 void App::begin() {
@@ -326,6 +338,12 @@ void App::finishDiscovery(uint32_t now) {
   char ids[obd2::kResponseIdsTextMax];
   obd2::formatResponseIds(ids, sizeof(ids), c.answered);
   console_.log("OBD: answered: %s", ids);
+  // What each answering ECU offers, once a boot: the same car each time.
+  if (!bitmapsLogged_) {
+    bitmapsLogged_ = true;
+    for (uint8_t e = 0; e < 8; e++)
+      if (c.answered & (1u << e)) logBitmap(obd2::kFirstResponseId + e, 0x00, discovery_.bitmap(e));
+  }
 
   if (!c.chosen) {
     // Nothing to ask for: stay waiting, and ask again after the backoff.
@@ -416,6 +434,15 @@ void App::trafficStopped() {
 void App::logSupport() {
   if (supportLogged_ || !poller_.supportKnown()) return;
   supportLogged_ = true;
+  // The chosen ECU's later bitmaps, those read, once a boot.
+  if (!laterBitmapsLogged_) {
+    laterBitmapsLogged_ = true;
+    for (unsigned base = 0x20; base < 0x100; base += 0x20) {
+      uint32_t bitmap = 0;
+      if (poller_.laterBitmap(static_cast<uint8_t>(base), bitmap))
+        logBitmap(poller_.requestId() + 8, static_cast<uint8_t>(base), bitmap);
+    }
+  }
   for (size_t i = 0; i < kChannels; i++) {
     const PollChannel& ch = poller_.channel(i);
     if (ch.state == ChannelState::Off) continue;
@@ -424,11 +451,52 @@ void App::logSupport() {
   }
 }
 
+// A support bitmap and the PIDs it lists, a console line at a time.
+void App::logBitmap(uint32_t responseId, uint8_t base, uint32_t bitmap) {
+  char text[obd2::kSupportLinesMax];
+  const size_t len = obd2::formatSupportLines(text, sizeof(text), responseId, base, bitmap, kReportLineColumns);
+  for (size_t start = 0, i = 0; i < len; i++) {
+    if (text[i] != '\n') continue;
+    console_.log("%.*s", static_cast<int>(i - start), text + start);
+    start = i + 1;
+  }
+}
+
+// Once multi-PID polling has started, the schedule it follows: which
+// channels go how often, once per vehicle session.
+void App::logSchedule() {
+  if (!poller_.takeStartedBundling()) return;
+  console_.log("OBD: several PIDs per request, one every %lu ms, the busiest with %u",
+               static_cast<unsigned long>(config::kObdCycleMs), static_cast<unsigned>(poller_.bundleStats().busiest));
+  // One line per cadence, fastest first.
+  uint32_t shown = 0;
+  for (;;) {
+    uint32_t every = 0;
+    for (size_t i = 0; i < kChannels; i++) {
+      const uint32_t e = poller_.channel(i).every;
+      if (e > shown && (every == 0 || e < every)) every = e;
+    }
+    if (every == 0) return;
+    char names[160];
+    size_t len = 0;
+    names[0] = '\0';
+    for (size_t i = 0; i < kChannels && len < sizeof(names); i++) {
+      if (poller_.channel(i).every != every) continue;
+      const int w = snprintf(names + len, sizeof(names) - len, "%s%s", len ? ", " : "", pollTable().decoders[i]->name);
+      if (w > 0) len += static_cast<size_t>(w);
+    }
+    console_.log("OBD: every %lu ms: %s", static_cast<unsigned long>(every * config::kObdCycleMs), names);
+    shown = every;
+  }
+}
+
 void App::refreshObdSummary(uint32_t nowMs) {
   obdSummary_.channelCount = kChannels;
   for (size_t i = 0; i < kChannels; i++) {
     const PollChannel& c = poller_.channel(i);
-    const obd2::PidDecoder& d = *pollTable().decoders[i];
+    // The second-choice PID's decoder, when the channel is asking for it.
+    const obd2::PidDecoder* alt = pollTable().alts[i];
+    const obd2::PidDecoder& d = alt && c.pid == alt->pid ? *alt : *pollTable().decoders[i];
     ObdChannelView& v = obdSummary_.channels[i];
     v.name = d.name;
     v.unit = d.unit;
@@ -452,6 +520,8 @@ void App::refreshObdSummary(uint32_t nowMs) {
       if (h.valid) v.value -= obd2::decode(*pollTable().decoders[m], h.data);
     }
   }
+  obdSummary_.bundles = poller_.bundleStats();
+  obdSummary_.bundling = config::kObdMaxPidsPerRequest > 1;
   obdSummary_.activity = activity();
 }
 
@@ -534,6 +604,9 @@ void App::canJob() {
     search_.frame(now);
     if (polling) {
       poller_.onFrame(f, now);
+      // A reply's first frame: the rest follows once the ECU has flow control.
+      CanFrame fc;
+      if (poller_.takeFlowControl(fc)) CanPort::send(fc);
     } else if (step_ != CanStep::Idle) {
       obd2::Mode01Reply r;
       if (obd2::parseMode01Reply(f, 0x00, r) && r.len == 4) {
@@ -556,7 +629,25 @@ void App::canJob() {
       console_.log("OBD: no replies to requests sent to 0x%03lX - asking everyone (0x%03lX) instead",
                    static_cast<unsigned long>(poller_.requestId()), static_cast<unsigned long>(poller_.sendId()));
     }
+    if (poller_.checkAnswered()) {
+      // Multi-PID requests went unanswered, one PID alone didn't: is the
+      // engine running? With no RPM channel to tell by, the answer is enough.
+      refreshObdSummary(now);
+      float rpm = 0.0f;
+      const bool running = pollTable().rpm >= kChannels || (rpmFresh(rpm) && rpm >= config::kEngineRunningMinRpm);
+      poller_.settleCheck(running);
+      if (!running) {
+        console_.log("OBD: multi-PID requests unanswered with the engine stopped (%ld rpm) - keeping them",
+                     static_cast<long>(rpm));
+      }
+    }
+    if (poller_.takeFellBack()) {
+      console_.log("OBD: multi-PID requests failed %u times in a row (%s) - one PID per request until the car is found again",
+                   static_cast<unsigned>(config::kBundleFallBackAfter),
+                   bundleFaultText(poller_.bundleStats().fault));
+    }
     logSupport();
+    logSchedule();
     refreshObdSummary(now);
     if (poller_.silentForMs(now) >= config::kVehicleLostMs) {
       vehicleLost();

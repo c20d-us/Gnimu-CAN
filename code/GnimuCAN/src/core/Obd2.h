@@ -13,7 +13,7 @@
 namespace gnimu {
 namespace obd2 {
 
-// OBD-II over CAN (ISO 15765-4), 11-bit IDs, Mode 01 single frames.
+// OBD-II over CAN (ISO 15765-4), 11-bit IDs, Mode 01.
 constexpr uint32_t kFunctionalRequestId = 0x7DF;  // every ECU listens
 constexpr uint32_t kFirstResponseId = 0x7E8;      // ECU n answers on 0x7E8 + n
 constexpr uint32_t kLastResponseId = 0x7EF;
@@ -27,6 +27,52 @@ constexpr uint8_t kPadByte = 0x55;           // ISO 15765-4's recommended paddin
 inline CanFrame mode01Request(uint8_t pid, uint32_t requestId = kFunctionalRequestId) {
   CanFrame f = {requestId, false, 8, {0x02, kModeCurrentData, pid, kPadByte, kPadByte, kPadByte, kPadByte, kPadByte}};
   return f;
+}
+
+// The most PIDs one Mode 01 request may ask for (SAE J1979, over CAN only).
+constexpr size_t kMaxPidsPerRequest = 6;
+
+// A Mode 01 request for `count` PIDs at once (1 to kMaxPidsPerRequest): a
+// single frame, padded to 8 bytes. The reply carries each supported PID with
+// its data, in any order (splitMode01Reply).
+inline CanFrame mode01Request(const uint8_t* pids, size_t count, uint32_t requestId) {
+  if (count > kMaxPidsPerRequest) count = kMaxPidsPerRequest;
+  CanFrame f = {requestId, false, 8, {static_cast<uint8_t>(1 + count), kModeCurrentData, kPadByte, kPadByte, kPadByte,
+                                      kPadByte, kPadByte, kPadByte}};
+  for (size_t i = 0; i < count; i++) f.data[2 + i] = pids[i];
+  return f;
+}
+
+// The ISO-TP flow control a receiver sends to `id` after a first frame:
+// continue, send the rest with no limit on the block size, no gap between
+// frames.
+inline CanFrame flowControl(uint32_t id) {
+  CanFrame f = {id, false, 8, {0x30, 0x00, 0x00, kPadByte, kPadByte, kPadByte, kPadByte, kPadByte}};
+  return f;
+}
+
+// Splits a reply to a request for several PIDs: its payload is 0x41, then
+// each PID the ECU supports followed by its data bytes, in any order, and
+// nothing after. `pids` and `lengths` are what was asked for and each one's
+// data length; `offsets[i]` gets where pids[i]'s data starts in `payload`, or
+// 0 when the reply left it out. False, when the reply doesn't split exactly
+// (a PID not asked for or repeated, a length that doesn't add up, nothing
+// answered): the whole reply is untrustworthy.
+inline bool splitMode01Reply(const uint8_t* payload, size_t len, const uint8_t* pids, const uint8_t* lengths,
+                             size_t count, uint8_t* offsets) {
+  for (size_t j = 0; j < count; j++) offsets[j] = 0;
+  if (len < 1 || payload[0] != kModeCurrentData + kPositiveResponse) return false;
+  size_t at = 1;
+  size_t answered = 0;
+  while (at < len) {
+    size_t j = 0;
+    while (j < count && pids[j] != payload[at]) j++;
+    if (j == count || offsets[j] != 0 || at + 1 + lengths[j] > len) return false;
+    offsets[j] = static_cast<uint8_t>(at + 1);
+    at += 1 + lengths[j];
+    answered++;
+  }
+  return answered > 0;
 }
 
 // Whether `pid` (0x01-0x20) is set in a PID 0x00 support bitmap, where the
@@ -50,6 +96,45 @@ inline void formatResponseIds(char* out, size_t cap, uint8_t mask) {
                            static_cast<unsigned long>(kFirstResponseId + n));
     if (w > 0) len += static_cast<size_t>(w);
   }
+}
+
+// Room for formatSupportLines(): the first line, and up to 32 PIDs wrapped
+// over the next two.
+constexpr size_t kSupportLinesMax = 192;
+
+// A support bitmap as console lines, each within `columns` (at least 40):
+// "OBD: 0x7E8 PIDs 01-20 (BE1FA813): 01 03 04 ..." then the PIDs it lists,
+// wrapped onto lines indented by 5 spaces; "none" for no bits. `base` is the
+// bitmap's PID (0x00, 0x20, ...), so it covers base + 1 to base + 0x20. Lines
+// end in '\n'. Truncated, never overrun; returns the length.
+inline size_t formatSupportLines(char* out, size_t cap, uint32_t responseId, uint8_t base, uint32_t bitmap,
+                                 size_t columns) {
+  if (cap == 0) return 0;
+  out[0] = '\0';
+  int w = snprintf(out, cap, "OBD: 0x%03lX PIDs %02X-%02X (%08lX):", static_cast<unsigned long>(responseId),
+                   static_cast<unsigned>(base + 1), static_cast<unsigned>(base + 0x20),
+                   static_cast<unsigned long>(bitmap));
+  if (w < 0) return 0;
+  size_t len = static_cast<size_t>(w) < cap ? static_cast<size_t>(w) : cap - 1;
+  size_t col = len;
+  const auto put = [&](const char* text) {
+    const int n = snprintf(out + len, cap - len, "%s", text);
+    if (n > 0) len += static_cast<size_t>(n) < cap - len ? static_cast<size_t>(n) : cap - len - 1;
+  };
+  if (bitmap == 0) put(" none");
+  for (uint8_t i = 1; i <= 0x20; i++) {
+    if (!pidSupported(bitmap, i)) continue;
+    if (col + 3 > columns) {
+      put("\n    ");
+      col = 4;
+    }
+    char pid[4];
+    snprintf(pid, sizeof(pid), " %02X", static_cast<unsigned>((base + i) & 0xFF));
+    put(pid);
+    col += 3;
+  }
+  put("\n");
+  return len;
 }
 
 struct Mode01Reply {

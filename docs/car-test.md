@@ -162,6 +162,66 @@ The firmware session only, idling, with the console logged over USB.
 
 ---
 
+## Results: both cars, one PID per request (2026-11-27)
+
+The firmware at the `pre-bundling` tag (frames at 30 Hz, the 5 ms `can` job, the 128-frame receive queue, the BLE Console), idling, with D reports read over the BLE Console in Gnimu Monitor.
+
+| | Santa Cruz | M2 |
+|---|---|---|
+| Requests to | `0x7E0` | `0x7DF`, everyone |
+| Timeouts | 0 | 0 |
+| Reply average / longest | 10 / 16 ms | 7 / 15 ms |
+| Requests a second, all channels | about 66 | about 72 |
+| RPM / throttle | about 22 / 17 Hz (targets 25 / 20) | about 23 / 18 Hz |
+
+Both cars were at their single-PID limit: a round trip plus the wait for the next 5 ms step holds each to about 70 requests a second, just under what the table asks for. The Santa Cruz's engine doesn't list coolant (`0x05`) or oil temperature (`0x5C`). The BLE stack refused 2–3% of frames, and every job showed one stall of about 5–6 ms.
+
+## Results: both cars, multi-PID polling (2026-11-27)
+
+Several PIDs per request on a 20 ms cycle, RPM and throttle at 50 Hz, the 1 ms `can` job, and the support bitmaps in the log. Idling, then the engine switched off and on again, with D reports and event logs read over the BLE Console.
+
+| | Santa Cruz | M2 |
+|---|---|---|
+| Multi-PID requests | 1632 in about 33 s | 937 in about 19 s |
+| PIDs per request / busiest | 2.6 / 3 | 2.6 / 3 |
+| Failed / late cycles / timeouts, engine running | 0 / 0 / 0 | 0 / 0 / 0 |
+| RPM / throttle | 50 / 50 Hz | 50 / 50 Hz |
+| Reply, one frame / several | about 10 / 19 ms (longest 25) | about 10 / 11 ms |
+
+- **Multi-PID works on both.** RPM and throttle went from about 22 and 17 Hz to 50 Hz each, with fewer requests (about 49 a second, against about 70).
+- **The M2's gateway passes flow control to `0x7E0`**, though it doesn't pass requests sent there: replies of several frames came back with flow control at the engine's own address, and it never switched to `0x7DF`.
+- **The Santa Cruz is slow to answer flow control:** about 9 ms from it to the rest of the reply, so replies of several frames take about 19 ms, still within the 20 ms cycle.
+- **Switching off made both fall back.** The ECU went quiet, the next three multi-PID requests timed out, and the poller blamed multi-PID: `multi-PID requests failed 3 times in a row (no reply in time) - one PID per request instead`, then `no replies for 2 s`. The fall back held for the boot, so both polled one PID per request after restarting, and the D report no longer said so. Fixed: after three timeouts it first asks for one PID alone, and falls back only if that's answered (see the next results for the rest).
+- **The support bitmaps:** the Santa Cruz's engine lists `67` (engine coolant temperature, two sensors) but not `05`, and no ECU lists `5C`; its transmission lists only `01` and `20`. Coolant now comes from `0x67` on cars without `0x05`. Oil temperature isn't in Mode 01 on the Santa Cruz, and would need Hyundai's own identifiers. The M2 lists everything in the table but `77`, and also `68`.
+- **The version showed `pre-bundling`** for a build with uncommitted changes on top. Builds from a changed tree now end in `-dirty`.
+- **Fuel read 0.0 %** on the M2 just after its restart, from the readings taken while it was off and starting; worth a look next time.
+- **The 5–6 ms stalls** show at a 1 ms step as skipped `can` runs (93–819 a boot): each one delays a request by up to about 6 ms. Not yet traced.
+
+## Results: Santa Cruz, the switch-off check (2026-11-27)
+
+Parked, then started, idled and switched off and on again, with the one-PID check, coolant from `0x67` and `-dirty` versions.
+
+- **Coolant from `0x67` works:** `OBD: PID 67 Coolant supported`, reading 41 °C rising to 52 °C as the engine warmed.
+- **Multi-PID while running:** 1026 requests, 2.6 PIDs each, RPM and throttle at 50 Hz, one failure in about 20 s, recovered.
+- **The version** shows `pre-bundling-dirty`, and the D report kept the fall back in the next session.
+- **Switching off still made it fall back.** The engine stopped at 116 s (`Vehicle: ignition on`); about 11 s later three multi-PID requests went unanswered, but RPM alone was answered, so it fell back (`no reply in time, though one PID alone is answered`); 2 s later the ECU went quiet altogether. Shutting down, the ECU stops answering multi-PID requests before single ones. Fixed: the one PID asked for alone is RPM, and an answer falls back only with the engine running (400 rpm or more); and the fall back, and flow control's move to `0x7DF`, now last a session rather than the boot, so each time the car is found it tries multi-PID again.
+
+## Results: Santa Cruz, per-session fall back (2026-11-27)
+
+The fall back lasting a session, the RPM check, one reply path for every request, and no flow control switch. Plugged in parked, started, idled, switched off until `Waiting for vehicle`, started again.
+
+- **No fall back at the switch-off.** The engine stopped at 95 s, the ECU went quiet, and 2 s later `no replies for 2 s - waiting for the vehicle`, with no `multi-PID requests failed`. This time the ECU didn't stop answering multi-PID requests before single ones, so the engine-stopped check (`… with the engine stopped … - keeping them`) didn't come up; it's still to be seen on a car.
+- **Multi-PID again after the restart:** the schedule lines, then 954 requests, 2.6 PIDs each, no failures, RPM and throttle at 50 Hz.
+- **While running, both sessions:** about 3,000 multi-PID requests with no failures, no late cycles and no timeouts; coolant from `0x67`, 45–48 °C. Replies of one frame about 10 ms and of several about 20 ms (longest 26 ms), as before.
+- **Waking:** after the switch-off, probes found an acknowledging but silent port at 113 s, no acknowledgement at 123 s (everything asleep), and an ECU answering at 133 s after the restart.
+
+## Next run
+
+- **On the M2:** the same switch-off and restart, and its fuel reading just after a restart.
+- **Either car:** watch for `multi-PID requests unanswered with the engine stopped` at a switch-off, the check that hasn't come up yet.
+
+---
+
 ## After both sessions
 
 - [ ] Update `Config.h` and `SystemConfig.h` from the results: probe threshold, engine-running level, parked hold, check interval, rise threshold.

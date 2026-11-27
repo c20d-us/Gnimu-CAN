@@ -18,15 +18,19 @@
 using namespace gnimu;
 
 static const PollChannelConfig kTwo[] = {{0x0C, 40, 2}, {0x11, 40, 1}};
-static const PollerConfig kPoller = {50, 0, 3, 5000, 3};
+static const PollerConfig kPoller = {50, 0, 3, 5000, 3, 20, 1, 3};  // one PID per request
 // PID 00 bitmap with 0x0C and 0x11 set (and 0x05, 0x0D, 0x0F, 0x20).
 static const uint32_t kBoth = 0x081A8001;
 
+// A reply carrying the PID's J1979 length: RPM's two bytes (a, b), 0x67's
+// three (a, b, 0), one byte (a) for the rest.
 static CanFrame reply(uint32_t id, uint8_t pid, uint8_t a, uint8_t b) {
   CanFrame f = {};
   f.id = id;
   f.len = 8;
-  const uint8_t d[8] = {4, 0x41, pid, a, b, 0x55, 0x55, 0x55};
+  const uint8_t n = pid == 0x0C ? 2 : pid == 0x67 ? 3 : 1;
+  const uint8_t d[8] = {static_cast<uint8_t>(2 + n), 0x41, pid, a, n > 1 ? b : uint8_t(0x55), n > 2 ? uint8_t(0) : uint8_t(0x55),
+                        0x55, 0x55};
   for (int i = 0; i < 8; i++) f.data[i] = d[i];
   return f;
 }
@@ -167,10 +171,51 @@ static void testLaterBitmaps() {
   assert(p.channel(1).state == ChannelState::Polling);
   assert(p.next(10, req) && req.data[2] == 0x40);
   assert(p.onFrame(bitmapReply(0x7E8, 0x40, bit(0x49 - 0x40)), 15));  // no 0x60
+  // Both kept as read, for the log; no 0x60, so none for it.
+  uint32_t kept = 0;
+  assert(p.laterBitmap(0x20, kept) && kept == (bit(0x2F - 0x20) | bit(0x20)));
+  assert(p.laterBitmap(0x40, kept) && kept == bit(0x49 - 0x40));
+  assert(!p.laterBitmap(0x60, kept) && !p.laterBitmap(0x00, kept) && !p.laterBitmap(0x30, kept));
   assert(p.channel(2).state == ChannelState::Polling);
   assert(p.channel(3).state == ChannelState::Unsupported);
   assert(p.supportKnown());
   assert(p.next(20, req) && req.data[2] != 0x60);
+
+  // A second choice (coolant: 0x05, else 0x67), used only when the
+  // bitmaps leave out the channel's own PID and list it.
+  {
+    const PollChannelConfig cool[] = {{0x0C, 40, 2}, {0x05, 1000, 1}};
+    ObdPoller<2> a(cool, kPoller);
+    a.setAlternate(1, 0x67, 3);
+    // 0x05 not listed: wait for the 0x60 bitmap, which lists 0x67.
+    a.start(0x7E0, bit(0x0C) | bit(0x20), 0);
+    assert(a.channel(1).state == ChannelState::Unknown);
+    assert(a.next(0, req) && req.data[2] == 0x20);
+    a.onFrame(bitmapReply(0x7E8, 0x20, bit(0x20)), 5);
+    assert(a.next(10, req) && req.data[2] == 0x40);
+    a.onFrame(bitmapReply(0x7E8, 0x40, bit(0x20)), 15);
+    assert(a.next(20, req) && req.data[2] == 0x60);
+    a.onFrame(bitmapReply(0x7E8, 0x60, bit(0x67 - 0x60)), 25);
+    assert(a.channel(1).state == ChannelState::Polling && a.channel(1).pid == 0x67);
+    // Asked for as 0x67, its reply's data kept from byte A.
+    bool asked = false;
+    for (uint32_t t = 30; t < 2000 && !asked; t += 10) {
+      if (!a.next(t, req)) continue;
+      if (req.data[2] == 0x67) {
+        asked = true;
+        a.onFrame(reply(0x7E8, 0x67, 0x01, 0x7B), t + 5);
+      } else {
+        a.onFrame(reply(0x7E8, req.data[2], 0x10, 0x20), t + 5);
+      }
+    }
+    assert(asked && a.channel(1).valid && a.channel(1).data[1] == 0x7B);
+    // Its own PID listed: that's used, and a new session starts from it.
+    a.start(0x7E0, bit(0x0C) | bit(0x05), 3000);
+    assert(a.channel(1).state == ChannelState::Polling && a.channel(1).pid == 0x05);
+    // Neither: not supported once the bitmaps end (no 0x20 here).
+    a.start(0x7E0, bit(0x0C), 4000);
+    assert(a.channel(1).state == ChannelState::Unsupported && a.channel(1).pid == 0x05);
+  }
 
   // No bitmap 0x20 claimed: nothing above 0x20 is supported, and none is asked for.
   ObdPoller<4> q(channels, kPoller);
@@ -248,7 +293,7 @@ static void testSilentChannelBacksOff() {
 // The request cap holds whatever the periods ask for.
 static void testRequestCap() {
   const PollChannelConfig channels[] = {{0x0C, 10, 2}, {0x11, 10, 1}};
-  const PollerConfig capped = {50, 20, 3, 5000, 3};  // at most 50 a second
+  const PollerConfig capped = {50, 20, 3, 5000, 3, 20, 1, 3};  // at most 50 a second
   ObdPoller<2> p(channels, capped);
   p.start(0x7E0, kBoth, 0);
   uint32_t sent = 0;
@@ -262,16 +307,20 @@ static void testRequestCap() {
   assert(sent == 50);
 }
 
-// A reply too short for its PID is answered, but carries no value.
+// A reply that isn't the PID's length (J1979's) isn't taken as its reply:
+// the request waits on for one that is, and times out without one.
 static void testShortReplyHasNoValue() {
   ObdPoller<2> p(kTwo, kPoller);
   p.start(0x7E0, bit(0x0C), 0);
   CanFrame req;
   assert(p.next(0, req) && req.data[2] == 0x0C);
   CanFrame shortReply = reply(0x7E8, 0x0C, 0x0C, 0);
-  shortReply.data[0] = 3;  // mode, PID, one byte: RPM needs two
-  assert(p.onFrame(shortReply, 2));
+  shortReply.data[0] = 3;  // mode, PID, one byte: RPM has two
+  assert(!p.onFrame(shortReply, 2));
   assert(!p.channel(0).valid && p.channel(0).replies == 0);
+  // The right reply still counts.
+  assert(p.onFrame(reply(0x7E8, 0x0C, 0x1A, 0xF8), 4));
+  assert(p.channel(0).valid && p.channel(0).replies == 1 && p.channel(0).data[1] == 0xF8);
 }
 
 // Found on the M2: the gateway passes only functional requests. Three

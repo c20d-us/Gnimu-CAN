@@ -109,6 +109,10 @@ class ObdDiscovery {
     return c;
   }
 
+  // The last round's PID 0x00 bitmap from the ECU on 0x7E8 + `ecu`; 0 if it
+  // didn't answer (the round's answered mask says which did).
+  uint32_t bitmap(uint8_t ecu) const { return ecu < kMaxEcus ? bitmaps_[ecu] : 0; }
+
   uint32_t failures() const { return failures_; }  // rounds in a row with nothing chosen
   uint32_t retryInMs() const { return retryMs_; }  // the wait after the last of them
 

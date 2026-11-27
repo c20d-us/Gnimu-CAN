@@ -8,6 +8,7 @@
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "../code/GnimuCAN/src/core/Obd2Pids.h"
 
@@ -54,6 +55,23 @@ static void testBoost() {
     if (obd2::kPidDecoders[i].minusPid) assert(obd2::helperFor(obd2::kPidDecoders[i].minusPid) != nullptr);
 }
 
+// Second choices: coolant from 0x67 (A: sensors present, B: sensor 1),
+// filling the same field, with a name and unit to match.
+static void testAlternates() {
+  const obd2::PidDecoder* own = obd2::decoderFor(F::CoolantTemp);
+  const obd2::PidDecoder* alt = obd2::altFor(F::CoolantTemp);
+  assert(own && alt && alt->pid == 0x67 && alt->length == 3 && obd2::bytesNeeded(*alt) == 2);
+  assert(alt->field == own->field && strcmp(alt->name, own->name) == 0 && strcmp(alt->unit, own->unit) == 0);
+  const uint8_t reply[4] = {0x01, 0x7B, 0x00, 0};
+  assert(near(obd2::decode(*alt, reply), 83.0f));
+  assert(obd2::altFor(F::EngineSpeed) == nullptr);
+  // Each fills a field with a decoder of its own, by a different PID.
+  for (size_t i = 0; i < obd2::kAltDecoderCount; i++) {
+    const obd2::PidDecoder* d = obd2::decoderFor(obd2::kAltDecoders[i].field);
+    assert(d && d->pid != obd2::kAltDecoders[i].pid && obd2::kAltDecoders[i].minusPid == 0);
+  }
+}
+
 static void testTable() {
   for (size_t i = 0; i < obd2::kPidDecoderCount; i++) {
     const obd2::PidDecoder& d = obd2::kPidDecoders[i];
@@ -72,6 +90,7 @@ static void testTable() {
 int main() {
   testExamples();
   testBoost();
+  testAlternates();
   testTable();
   printf("test_obd2pids: ok\n");
   return 0;

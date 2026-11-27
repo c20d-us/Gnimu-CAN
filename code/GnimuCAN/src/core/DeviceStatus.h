@@ -59,6 +59,8 @@ struct ObdSummary {
   uint32_t requestId;   // its physical request ID
   uint8_t channelCount;
   ObdChannelView channels[kMaxObdChannels];
+  bool bundling;        // Config.h allows several PIDs per request
+  BundleStats bundles;  // ... and how that's going this session
   VehicleActivity activity;
 };
 

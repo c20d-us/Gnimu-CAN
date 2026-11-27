@@ -93,6 +93,8 @@ static DeviceStatus widestInPractice() {
   d.ble.stats.mtu = 517;
   d.sleep.sleepCount = 99999999;
   d.sleep.checks = 99999999;
+  d.obd.bundling = true;
+  d.obd.bundles = {true, false, BundleFault::None, 6, 999999999, 999999999, 999999999, 99999999, 99999999};
   return d;
 }
 
@@ -108,11 +110,17 @@ static void testReportLinesFitAPhone() {
   Job jobs[1] = {{"can", 5000, 2000, nullptr, nullptr}};
   JobStats stats[1] = {};
   const JobTable t = {jobs, stats, 1, 0};
-  for (int nothingToPoll = 0; nothingToPoll < 2; nothingToPoll++) {
+  // As it is, with nothing to poll, and after multi-PID polling fell back.
+  for (int variant = 0; variant < 3; variant++) {
     DeviceStatus d = widestInPractice();
-    if (nothingToPoll) {
+    if (variant == 1) {
       d.obd.ecuFound = false;
       d.obd.nothingToPoll = true;
+    }
+    if (variant == 2) {
+      d.obd.bundles.active = false;
+      d.obd.bundles.fellBack = true;
+      d.obd.bundles.fault = BundleFault::NoRest;
     }
     static char buf[kReportMaxBytes];
     const size_t n = formatReport(buf, sizeof(buf), t, d);
@@ -137,6 +145,7 @@ static void testReportLinesFitAPhone() {
   formatReport(buf, sizeof(buf), t, widestInPractice());
   assert(strstr(buf, "requests 99999999\n     replies 99999999") != nullptr);
   assert(strstr(buf, "NOT ANSWERING, every 99999 ms") != nullptr);
+  assert(strstr(buf, "OBD: multi-PID 999999999 requests, 1.0 PIDs each, busiest 6\n") != nullptr);
 }
 
 // The boot log's command help: every command, the number explained, the
@@ -156,6 +165,36 @@ static void testConsoleHelp() {
     assert(columns(buf + start, i - start) <= kReportLineColumns);
     start = i + 1;
   }
+}
+
+// A support bitmap's log lines: the PIDs it lists, wrapped within the
+// report's width, "none" for none.
+static void testSupportLines() {
+  char buf[obd2::kSupportLinesMax];
+  size_t n = obd2::formatSupportLines(buf, sizeof(buf), 0x7E9, 0x00, 0x98180001, kReportLineColumns);
+  assert(strcmp(buf, "OBD: 0x7E9 PIDs 01-20 (98180001): 01 04 05 0C 0D 20\n") == 0 && n == strlen(buf));
+  // Every PID: wrapped, each line within the width, all 32 listed.
+  n = obd2::formatSupportLines(buf, sizeof(buf), 0x7E8, 0x60, 0xFFFFFFFF, kReportLineColumns);
+  assert(n + 1 < sizeof(buf));
+  assert(strncmp(buf, "OBD: 0x7E8 PIDs 61-80 (FFFFFFFF): 61 62", 39) == 0);
+  assert(strstr(buf, "\n     ") != nullptr && strstr(buf, " 80\n") != nullptr);
+  size_t start = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (buf[i] != '\n') continue;
+    assert(i - start <= kReportLineColumns);
+    start = i + 1;
+  }
+  for (unsigned pid = 0x61; pid <= 0x80; pid++) {
+    char want[5];
+    snprintf(want, sizeof(want), " %02X", pid);
+    assert(strstr(buf + 33, want) != nullptr);  // after the "(...):"
+  }
+  obd2::formatSupportLines(buf, sizeof(buf), 0x7E8, 0x20, 0, kReportLineColumns);
+  assert(strcmp(buf, "OBD: 0x7E8 PIDs 21-40 (00000000): none\n") == 0);
+  // Too little room: cut short, never overrun.
+  char tiny[20];
+  n = obd2::formatSupportLines(tiny, sizeof(tiny), 0x7E8, 0x00, 0xFFFFFFFF, kReportLineColumns);
+  assert(n == strlen(tiny) && n < sizeof(tiny));
 }
 
 static void testStatusLineFits() {
@@ -195,6 +234,7 @@ int main() {
   testStatusLineFits();
   testReportLinesFitAPhone();
   testConsoleHelp();
+  testSupportLines();
   testSchemaJson();
   testDeviceInfoJson();
   printf("test_text: ok\n");

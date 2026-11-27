@@ -53,7 +53,7 @@ scripts/build.sh
 scripts/flash.sh --monitor
 ```
 
-`build.sh` stamps the version, git revision and build time into the firmware, and fails on any compiler warning in the project's own code. `flash.sh` uploads what was last built (add `--build` to build first) and finds the XIAO by its USB ID; with more than one plugged in, pass `--port /dev/cu.usbmodemXXXX`. With a USB-C host, connect USB before powering the board from 12V, or it won't show up (see [Bench rig](docs/architecture.md#bench-rig)).
+`build.sh` stamps the version (the latest tag, or the commit, ending in `-dirty` when built with uncommitted changes), git revision and build time into the firmware, and fails on any compiler warning in the project's own code. `flash.sh` uploads what was last built (add `--build` to build first) and finds the XIAO by its USB ID; with more than one plugged in, pass `--port /dev/cu.usbmodemXXXX`. With a USB-C host, connect USB before powering the board from 12V, or it won't show up (see [Bench rig](docs/architecture.md#bench-rig)).
 
 The host tests cover the hardware-independent logic in `code/GnimuCAN/src/core`:
 

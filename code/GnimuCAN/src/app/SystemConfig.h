@@ -14,6 +14,7 @@
 
 #include "../../Config.h"
 #include "../core/DeviceStatus.h"
+#include "../core/Obd2.h"
 #include "../core/Obd2Pids.h"
 
 namespace gnimu {
@@ -25,8 +26,10 @@ namespace config {
 // CAN: drains the controller's receive queue, checks the bit rate, makes
 // gateway probes and asks for an ECU. Nothing waits inside it: a request is
 // sent, and later runs take the reply or time it out.
-constexpr uint32_t kCanPeriodUs = 5000;
-constexpr uint32_t kCanBudgetUs = 2000;
+// Every millisecond, so a reply's flow control and the next request go out
+// within about a millisecond.
+constexpr uint32_t kCanPeriodUs = 1000;
+constexpr uint32_t kCanBudgetUs = 1000;
 // The frame: one Gnimu frame per period while a client is subscribed.
 constexpr uint32_t kEmitPeriodUs = 1000000 / kEmitRateHz;
 constexpr uint32_t kEmitBudgetUs = 2000;
@@ -102,6 +105,10 @@ constexpr uint32_t kSilentRetryMs = 5000;
 // gateways pass only functional requests from the OBD port. Remembered for
 // the rest of the boot.
 constexpr uint8_t kAskEveryoneAfterTimeouts = 3;
+// Multi-PID requests that fail this many times in a row (no reply in time, a
+// reply that doesn't parse, "not supported"): one PID per request for the
+// rest of the boot.
+constexpr uint8_t kBundleFallBackAfter = 3;
 // With traffic on the bus but no ECU answering, how long before asking again:
 // every 5 s for 3 tries, every 30 s for the next 3, then every 2 minutes
 // (core/DiscoveryBackoff.h). Starts over when the bus goes quiet.
@@ -165,8 +172,8 @@ constexpr bool pollsHaveDecoders(size_t i = 0) {
   return i >= kObdPollCount || (obd2::hasDecoder(kObdPolls[i].field) && pollsHaveDecoders(i + 1));
 }
 constexpr bool pollPeriodsValid(size_t i = 0) {
-  return i >= kObdPollCount ||
-         ((kObdPolls[i].periodMs == 0 || kObdPolls[i].periodMs >= 10) && pollPeriodsValid(i + 1));
+  return i >= kObdPollCount || ((kObdPolls[i].periodMs == 0 || kObdPolls[i].periodMs % kObdCycleMs == 0) &&
+                                pollPeriodsValid(i + 1));
 }
 constexpr bool fieldOnceAfter(size_t i, size_t j) {
   return j >= kObdPollCount || (kObdPolls[i].field != kObdPolls[j].field && fieldOnceAfter(i, j + 1));
@@ -191,7 +198,12 @@ static_assert(kGatewayProbeBitrate == 500000 || kGatewayProbeBitrate == 250000,
 static_assert(kProbeReplyMs > kProbeTxConfirmMs && kProbeReplyMs < kProbeIntervalMs,
               "a probe waits longer for a reply than for the frame to go, and ends before the next is due");
 static_assert(pollsHaveDecoders(), "every channel in kObdPolls needs a decoder in core/Obd2Pids.h");
-static_assert(pollPeriodsValid(), "kObdPolls periods must be 0 (off) or at least 10 ms");
+static_assert(kObdCycleMs >= 10 && kObdCycleMs <= 1000, "the OBD cycle must be 10-1000 ms");
+static_assert(pollPeriodsValid(), "kObdPolls periods must be 0 (off) or a whole number of cycles (kObdCycleMs)");
+static_assert(kHelperPeriodMs % kObdCycleMs == 0, "the helper PIDs' period must be a whole number of cycles");
+static_assert(kObdMaxPidsPerRequest >= 1 && kObdMaxPidsPerRequest <= obd2::kMaxPidsPerRequest,
+              "kObdMaxPidsPerRequest must be 1-6 (SAE J1979)");
+static_assert(1000 / kMaxObdRequestsPerSec <= kObdCycleMs, "the OBD cycle is shorter than the request cap allows");
 static_assert(pollFieldsUnique(), "a field appears more than once in kObdPolls");
 static_assert(kObdChannelCount <= kMaxObdChannels,
               "more channels in kObdPolls than the reports hold");

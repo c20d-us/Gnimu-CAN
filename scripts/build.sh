@@ -26,7 +26,8 @@ command -v arduino-cli >/dev/null 2>&1 || {
 }
 
 revision="$(git rev-parse --short=12 HEAD 2>/dev/null || printf 'unknown')"
-version="$(git describe --tags --always 2>/dev/null || printf '0.0.0-dev')"
+# "-dirty" on the end: built with changes not yet committed.
+version="$(git describe --tags --always --dirty 2>/dev/null || printf '0.0.0-dev')"
 build_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 extra_flags="-DGNIMU_VERSION=\"${version}\" -DGNIMU_REVISION=\"${revision}\""

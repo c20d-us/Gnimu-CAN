@@ -82,20 +82,30 @@ constexpr float kWakeCheckOffsetV = 0.10f;
 
 // OBD-II polling
 
+// Multi-PID polling (docs/architecture.md, Polling): one request every
+// kObdCycleMs, asking for each channel whose turn it is, up to
+// kObdMaxPidsPerRequest at once. 1 asks for one PID per request, always.
+// A car that can't take several PIDs per request falls back to one by itself.
+constexpr uint32_t kObdCycleMs = 20;
+constexpr uint32_t kObdMaxPidsPerRequest = 6;
+
 // The Mode 01 channels: which to poll and how often. A period of 0 turns a
-// channel off. Periods are targets: the car's reply rate is shared between
-// the channels, and the D report and status line show the rate each one
-// actually gets. Order matters: ECU discovery prefers the ECU supporting the
-// first channels, and the status line shows the first four polled. How each
-// PID decodes is fixed by the standard (src/core/Obd2Pids.h).
+// channel off; any other is a whole number of cycles (kObdCycleMs). With
+// several PIDs per request, a channel is in every period / cycle'th request,
+// so its rate is exact while the car answers within a cycle. One PID per
+// request, the periods are targets: the car's reply rate is shared between
+// the channels. The D report and status line show the rate each one actually
+// gets. Order matters: ECU discovery prefers the ECU supporting the first
+// channels, and the status line shows the first four polled. How each PID
+// decodes is fixed by the standard (src/core/Obd2Pids.h).
 struct ObdPoll {
   gnimu_frame::v1::Field field;
   uint32_t periodMs;
 };
 using F = gnimu_frame::v1::Field;
 constexpr ObdPoll kObdPolls[] = {
-    {F::EngineSpeed, 40},            // PID 0C, 25 Hz
-    {F::ThrottlePosition, 50},       // PID 11, 20 Hz
+    {F::EngineSpeed, 20},            // PID 0C, 50 Hz
+    {F::ThrottlePosition, 20},       // PID 11, 50 Hz
     {F::AcceleratorPedal, 100},      // PID 49, 10 Hz
     {F::VehicleSpeed, 100},          // PID 0D, 10 Hz
     {F::Boost, 100},                 // PID 0B minus 33 (read every 5 s), 10 Hz
@@ -106,10 +116,10 @@ constexpr ObdPoll kObdPolls[] = {
     {F::AmbientTemp, 5000},          // PID 46, every 5 s
     {F::FuelLevel, 5000},            // PID 2F, every 5 s
 };
-// About 79 requests a second in all. The M2 answered 69 a second with
-// replies in under 10 ms (docs/car-test.md), and kMaxObdRequestsPerSec caps
-// the total. A car that can't keep up gives each channel a share in
-// proportion to its period.
+// Several PIDs per request: 50 requests a second, the busiest carrying 3
+// PIDs. One PID per request, these ask for about 135 a second, more than the
+// M2 answers (69 a second, docs/car-test.md): each channel then gets a share
+// in proportion to its period.
 // At most this many requests a second across all channels, whatever the
 // periods add up to, so the car's diagnostic bus never sees more.
 constexpr uint32_t kMaxObdRequestsPerSec = 100;

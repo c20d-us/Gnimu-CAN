@@ -40,6 +40,8 @@ static void testTransmissionFirstStillPicksTheEngine() {
   });
   assert(c.chosen && c.ecu == 0 && c.bitmap == kEngine);
   assert(c.answered == 0x03);
+  // Every answering ECU's bitmap stays readable, for the log.
+  assert(d.bitmap(0) == kEngine && d.bitmap(1) == kTransmission && d.bitmap(2) == 0 && d.bitmap(9) == 0);
 }
 
 static void testOnlyAnotherEcuHasRpm() {

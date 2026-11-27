@@ -166,6 +166,19 @@ inline size_t formatReport(char *buf, size_t cap, const JobTable &t, const Devic
   } else {
     o.put("OBD: no ECU\n");
   }
+  if (d.obd.ecuFound && d.obd.bundles.fellBack) {
+    o.put("OBD: one PID per request: multi-PID requests failed\n     (%s)\n", bundleFaultText(d.obd.bundles.fault));
+  } else if (d.obd.ecuFound && d.obd.bundles.active) {
+    const BundleStats &b = d.obd.bundles;
+    const uint32_t tenths = b.requests ? static_cast<uint32_t>(static_cast<uint64_t>(b.pidsAsked) * 10 / b.requests) : 0;
+    o.put("OBD: multi-PID %lu requests, %lu.%lu PIDs each, busiest %u\n"
+          "     replies %lu, failed %lu, late cycles %lu\n",
+          static_cast<unsigned long>(b.requests), static_cast<unsigned long>(tenths / 10),
+          static_cast<unsigned long>(tenths % 10), static_cast<unsigned>(b.busiest), static_cast<unsigned long>(b.replies),
+          static_cast<unsigned long>(b.failures), static_cast<unsigned long>(b.late));
+  } else if (d.obd.ecuFound && !d.obd.bundling) {
+    o.put("OBD: one PID per request (Config.h)\n");
+  }
   for (size_t i = 0; i < d.obd.channelCount && i < kMaxObdChannels; i++) {
     const ObdChannelView &c = d.obd.channels[i];
     if (c.state == ChannelState::Off) continue;

@@ -95,6 +95,8 @@ class App {
   // The engine-speed channel's value; true when it's fresh.
   bool rpmFresh(float& rpm) const;
   void logSupport();
+  void logBitmap(uint32_t responseId, uint8_t base, uint32_t bitmap);
+  void logSchedule();
   // A timer wake from deep sleep: a quick supply reading and a listen on the
   // bus, then either back to sleep (never returns) or on into a full boot.
   void wakeCheck(SleepRecord r);
@@ -123,6 +125,8 @@ class App {
   // The OBD channels, in Config.h's kObdPolls order, then helper PIDs.
   ObdPoller<config::kObdChannelCount> poller_;
   bool supportLogged_ = false;  // this session's supported channels have been logged
+  bool bitmapsLogged_ = false;  // the answering ECUs' PID 0x00 bitmaps: logged once a boot
+  bool laterBitmapsLogged_ = false;  // ... and the chosen ECU's later ones
   bool askEveryone_ = false;    // the ECU answers only requests to 0x7DF: found this boot
   // The BLE Console (Gnimu protocol, docs/frame.md, Console).
   ConsoleReply<config::kBleReplyBytes> bleReply_;
