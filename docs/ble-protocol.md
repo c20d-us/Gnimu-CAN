@@ -17,6 +17,7 @@ These are the Gnimu protocol's UUIDs, the same on every Gnimu device. The Contro
 | Frame characteristic | `0752d3c3-ceaf-462f-a944-bcc06c57284b` | Notify, Read |
 | Schema characteristic | `1c9b3945-10eb-4fd0-a5a4-b9d80842380d` | Read |
 | Device info characteristic | `6d0adfef-8218-488a-a5f9-1ba05f422c22` | Read |
+| Console characteristic | `10c6ca42-2889-4c3e-aa00-25211918ec8f` | Write, Write without response, Notify |
 
 It also provides the standard Device Information Service (`0x180A`):
 
@@ -45,7 +46,7 @@ More vehicle fields come as the firmware polls more PIDs. Each new one fills its
 
 ## Rate
 
-Gnimu-CAN has no GNSS, so under the protocol's [rate rule](https://github.com/c20d-us/Gnimu-protocol/blob/main/docs/frame.md#rate) it sends at a fixed rate. While a client is subscribed, that's 20 Hz to start, with a target in the 30–50 Hz range once testing shows what's worthwhile (see [Emit rate](architecture.md#emit-rate)). Every frame carries the latest value of each field.
+Gnimu-CAN has no GNSS, so under the protocol's [rate rule](https://github.com/c20d-us/Gnimu-protocol/blob/main/docs/frame.md#rate) it sends at a fixed rate. While a client is subscribed, that's 30 Hz, within a target of 30–50 Hz (see [Emit rate](architecture.md#emit-rate)). Every frame carries the latest value of each field.
 
 AutoXDL accepts frames at whatever rate the device sends them and aligns the values to its GNSS source's cadence, with each recorded row carrying the latest value.
 
@@ -101,18 +102,45 @@ The device info characteristic returns the build and current settings, in the [f
 | `vehicle` | `"obd2"` | Vehicle profile |
 | `can` | `"auto 500/250"` | CAN bit rates tried, in order |
 | `probe_kbps` | `500` | Gateway probe bit rate |
-| `emit_hz` | `20` | Frame rate |
+| `emit_hz` | `30` | Frame rate |
 | `run_v` | `13.20` | Engine-running threshold, V |
 | `cutoff_v` | `11.80` | Low-voltage cutoff, V |
-| `supply_cal` | `1.010` | Supply calibration factor |
-| `pids` | `"0C,11"` | Mode 01 PIDs polled |
+| `supply_cal` | `1.028` | Supply calibration factor |
+| `pids` | `"0C,11,49,0D,0B,05,0F,5C,77,46,2F"` | Mode 01 PIDs polled, from `kObdPolls` |
+
+It also has the protocol's optional `console` key, listing the [Console](#console) commands it accepts: `["D","E","V","P","n"]`.
 
 ```json
 {"v":1,"build":{"rev":"7f7efe5f4d6a","utc":"2026-10-30T17:27:43Z","target":"esp32c6"},
- "cfg":{"hw":"12v","vehicle":"obd2","can":"auto 500/250","probe_kbps":500,"emit_hz":20,"run_v":13.20,"cutoff_v":11.80,"supply_cal":1.010,"pids":"0C,11"}}
+ "cfg":{"hw":"12v","vehicle":"obd2","can":"auto 500/250","probe_kbps":500,"emit_hz":30,"run_v":13.20,"cutoff_v":11.80,"supply_cal":1.028,"pids":"0C,11,49,0D,0B,05,0F,5C,77,46,2F"},
+ "console":["D","E","V","P","n"]}
 ```
 
 The `V` console command prints the same settings, as text.
+
+## Console
+
+The Console characteristic is the [protocol's Console](https://github.com/c20d-us/Gnimu-protocol/blob/main/docs/frame.md#console): the USB console's report commands, readable with just a phone, in Gnimu Monitor or a generic BLE app such as LightBlue or nRF Connect. Turn on notifications, write a command, and the reply arrives as text ending in the byte `0x04`. Its first line names the command it answers: `> ` and the command as written, upper-cased, such as `> D`, `> E 20` or `> 60` (an unrecognised one too, cut to 32 bytes).
+
+```
+> E 3
+      1287.412  OBD: no replies for 2 s - waiting for the vehicle
+      1287.903  CAN: traffic at 500 kbit/s ✅
+      1288.015  OBD: answered: 0x7E8, 0x7E9
+```
+
+| Command | Reply |
+|---|---|
+| `D` | The diagnostics report |
+| `E` | The boot log and recent events |
+| `E n` | The last *n* events |
+| `V` | Version and settings |
+| `P` | Protocol setup for an app |
+| a number *n* | `status line once a second` (or `status line off` for `0`), then the status line once a second, *n* times, each its own reply starting `> n` |
+
+`C`, `L`, `R` and `W` change the device, and are refused over BLE (`> R`, then `not available over BLE without bonding`). A number too large gets `number out of range`, anything else `unrecognised command`. Commands come at most every half second: one sooner gets its `> ` line and `busy` straight away, and one that arrives while a reply is still going out gets the same once that reply has finished; of several, only the last is answered. A write of only CR or LF gets no reply. Replies go out one notification per 10 ms, behind the frames, so the full event log (up to about 18 KB) takes under a second at the usual MTU.
+
+The `D` report keeps its lines below the job table within 73 columns, so a phone can show it unwrapped: longer lines, such as each channel's, continue on an indented second line.
 
 ## Limits
 

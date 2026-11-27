@@ -19,6 +19,17 @@ constexpr char kGnimuServiceUuid[] = "9074beb4-2f1a-4b5f-9818-fe2d2277ef05";
 constexpr char kGnimuFrameV1Uuid[] = "0752d3c3-ceaf-462f-a944-bcc06c57284b";
 constexpr char kGnimuSchemaUuid[] = "1c9b3945-10eb-4fd0-a5a4-b9d80842380d";
 constexpr char kGnimuDeviceInfoUuid[] = "6d0adfef-8218-488a-a5f9-1ba05f422c22";
+constexpr char kGnimuConsoleUuid[] = "10c6ca42-2889-4c3e-aa00-25211918ec8f";
+
+// The longest Console command a client may write.
+constexpr size_t kBleCommandMax = 32;
+
+// How a Console notification went.
+enum class ConsoleSend : uint8_t {
+  Sent,
+  Busy,          // the stack had no room: try again shortly
+  NotListening,  // no client, or it hasn't turned notifications on
+};
 
 // What the peripheral shows a client: its name, the Device Information
 // Service strings, and the two JSON documents. The stack copies every value,
@@ -35,10 +46,11 @@ struct BleIdentity {
 };
 
 // The Gnimu service on the C6's NimBLE stack: the frame (notify, read), the
-// schema and Device info (read), and the Device Information Service. One client
-// at a time: advertising stops while one is connected and resumes when it
-// leaves. Stack callbacks run on the BLE host's task, so they only update
-// atomics; everything else, including logging, happens on the loop.
+// schema and Device info (read), the Console (write, notify), and the Device
+// Information Service. One client at a time: advertising stops while one is
+// connected and resumes when it leaves. Stack callbacks run on the BLE host's
+// task, so they only update atomics or hand a written command over;
+// everything else, including logging, happens on the loop.
 class BlePeripheral {
  public:
   // Builds the GATT table and starts advertising. True once advertising.
@@ -52,6 +64,14 @@ class BlePeripheral {
   bool send(const uint8_t* data, size_t len);
   BleStats stats() const;
   void clearMaxSend() { link_.clearMaxSend(); }
+
+  // A Console command a client has written, if one is waiting: copied into
+  // `out` (NUL-terminated). Loop only.
+  bool takeCommand(char (&out)[kBleCommandMax + 1]);
+  // Notifies one chunk of a Console reply.
+  ConsoleSend sendConsole(const char* data, size_t len);
+  // The connected peer's ATT MTU; 23 until it negotiates more.
+  uint16_t mtu() const;
 
  private:
   BleLink link_;  // MTU refusal, send counters, connection-edge logging

@@ -29,6 +29,7 @@ constexpr uint16_t kLocalMtu = 247;
 
 BLEServer* server = nullptr;
 BLECharacteristic* frameChar = nullptr;
+BLECharacteristic* consoleChar = nullptr;
 std::atomic<bool> linkUp{false};
 std::atomic<uint16_t> peerMtu{23};  // ATT default until the exchange raises it
 
@@ -52,6 +53,26 @@ NotifyStatus lastNotifyStatus = NotifyStatus::ERROR_NO_CLIENT;
 
 class FrameCallbacks : public BLECharacteristicCallbacks {
   void onStatus(BLECharacteristic*, Status s, uint32_t) override { lastNotifyStatus = s; }
+};
+
+// A written Console command, handed from the BLE host's task to the loop: the
+// host writes it only while `commandReady` is clear, and the loop clears it
+// once it has copied the command out. A command written before the last was
+// taken is dropped.
+char pendingCommand[kBleCommandMax + 1] = {};
+std::atomic<bool> commandReady{false};
+NotifyStatus lastConsoleStatus = NotifyStatus::ERROR_NO_CLIENT;
+
+class ConsoleCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* c) override {
+    if (commandReady.load(std::memory_order_acquire)) return;
+    const String v = c->getValue();
+    const size_t n = v.length() < kBleCommandMax ? v.length() : kBleCommandMax;
+    memcpy(pendingCommand, v.c_str(), n);
+    pendingCommand[n] = '\0';
+    commandReady.store(true, std::memory_order_release);
+  }
+  void onStatus(BLECharacteristic*, Status s, uint32_t) override { lastConsoleStatus = s; }
 };
 
 void addReadOnly(BLEService* service, const char* uuid, const char* value) {
@@ -79,6 +100,10 @@ bool BlePeripheral::begin(const BleIdentity& id, Console& log) {
   frameChar->setCallbacks(new FrameCallbacks());
   addReadOnly(gnimu, kGnimuSchemaUuid, id.schemaJson);
   addReadOnly(gnimu, kGnimuDeviceInfoUuid, id.deviceInfoJson);
+  consoleChar = gnimu->createCharacteristic(kGnimuConsoleUuid, BLECharacteristic::PROPERTY_WRITE |
+                                                                   BLECharacteristic::PROPERTY_WRITE_NR |
+                                                                   BLECharacteristic::PROPERTY_NOTIFY);
+  consoleChar->setCallbacks(new ConsoleCallbacks());
   gnimu->start();
 
   BLEService* info = server->createService(kDeviceInfoServiceUuid);
@@ -121,6 +146,31 @@ bool BlePeripheral::send(const uint8_t* data, size_t len) {
   if (lastNotifyStatus == NotifyStatus::ERROR_NO_SUBSCRIBER) return false;
   return link_.sent(lastNotifyStatus == NotifyStatus::SUCCESS_NOTIFY, start);
 }
+
+bool BlePeripheral::takeCommand(char (&out)[kBleCommandMax + 1]) {
+  if (!commandReady.load(std::memory_order_acquire)) return false;
+  memcpy(out, pendingCommand, sizeof(out));
+  commandReady.store(false, std::memory_order_release);
+  return true;
+}
+
+ConsoleSend BlePeripheral::sendConsole(const char* data, size_t len) {
+  if (!connected() || consoleChar == nullptr) return ConsoleSend::NotListening;
+  lastConsoleStatus = NotifyStatus::ERROR_NO_CLIENT;
+  consoleChar->setValue(reinterpret_cast<uint8_t*>(const_cast<char*>(data)), len);
+  consoleChar->notify();
+  switch (lastConsoleStatus) {
+    case NotifyStatus::SUCCESS_NOTIFY:
+      return ConsoleSend::Sent;
+    case NotifyStatus::ERROR_NO_SUBSCRIBER:
+    case NotifyStatus::ERROR_NO_CLIENT:
+      return ConsoleSend::NotListening;
+    default:
+      return ConsoleSend::Busy;
+  }
+}
+
+uint16_t BlePeripheral::mtu() const { return connected() ? peerMtu.load(std::memory_order_acquire) : 23; }
 
 BleStats BlePeripheral::stats() const {
   BleStats s = link_.stats();

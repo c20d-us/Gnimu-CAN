@@ -11,6 +11,7 @@
 #include "SystemConfig.h"
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 
 namespace gnimu {
 
@@ -29,6 +30,8 @@ ConsoleCommand Console::poll() {
         continue;
       case EntryKind::Command:
         result.kind = r.cmd;
+        result.hasArg = r.hasArg;
+        result.arg = r.arg;
         break;
       case EntryKind::Count:
         result.hasCount = true;
@@ -54,11 +57,6 @@ void Console::printReport(const JobTable& jobs, const DeviceStatus& status) {
   emit(buf, formatReport(buf, sizeof(buf), jobs, status));
 }
 
-void Console::printStatus(const DeviceStatus& status, const StatusRates& rates) {
-  char buf[kStatusLineMaxBytes];
-  emit(buf, formatStatus(buf, sizeof(buf), status, rates));
-}
-
 void Console::flush() {
   // The port's transmit timeout is 0 so that output never blocks, and flush()
   // waits only that long: it returned at once and left the last, partial USB
@@ -82,7 +80,26 @@ void Console::log(const char* fmt, ...) {
   // vsnprintf returns the untruncated length; the buffer holds one less than
   // its size.
   const size_t n = r < 0 ? 0 : static_cast<size_t>(r);
-  emit(buf, n < sizeof(buf) ? n : sizeof(buf) - 1);
+  const size_t len = n < sizeof(buf) ? n : sizeof(buf) - 1;
+  events_.add(static_cast<uint32_t>(PlatformClock::nowUs() / 1000), buf, len);
+  emit(buf, len);
+}
+
+void Console::printEvents(size_t lastN) {
+  events_.forEachLine([this](const char* text, size_t n) { emit(text, n); }, lastN);
+}
+
+size_t Console::formatEvents(char* buf, size_t cap, size_t lastN) const {
+  size_t len = 0;
+  events_.forEachLine(
+      [&](const char* text, size_t n) {
+        if (cap == 0 || len + n + 1 > cap) return;
+        memcpy(buf + len, text, n);
+        len += n;
+        buf[len++] = '\n';
+      },
+      lastN);
+  return len;
 }
 
 // Sends text to the console a line at a time, each ending in CR+LF whatever

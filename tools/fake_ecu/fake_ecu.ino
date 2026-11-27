@@ -10,14 +10,22 @@
 // It answers OBD-II Mode 01 requests on 0x7DF (functional) and 0x7E0
 // (physical) from 0x7E8, with values that change over time:
 //
-//   PID 0x00  supported PIDs 01-20 (05, 0C, 0D, 0F, 11)
+//   PID 0x00  supported PIDs 01-20 (05, 0B, 0C, 0D, 0F, 11, 20)
 //   PID 0x05  coolant temperature, 90 °C
+//   PID 0x0B  manifold absolute pressure, 30-200 kPa following the throttle
 //   PID 0x0C  RPM, sweeping 800-6500 and back over 20 s
 //   PID 0x0D  vehicle speed, 0-120 km/h with the RPM sweep
 //   PID 0x0F  intake air temperature, 30 °C
 //   PID 0x11  throttle, a 0-100 % sawtooth every 5 s
-//   PID 0x20  supported PIDs 21-40 (46)
+//   PID 0x20  supported PIDs 21-40 (2F, 33, 40)
+//   PID 0x2F  fuel level, 60 %
+//   PID 0x33  barometric pressure, 101 kPa
+//   PID 0x40  supported PIDs 41-60 (46, 49, 5C, 60)
 //   PID 0x46  ambient air temperature, 20 °C
+//   PID 0x49  accelerator pedal, following the throttle
+//   PID 0x5C  oil temperature, 100 °C
+//   PID 0x60  supported PIDs 61-80 (77)
+//   PID 0x77  charge air cooler temperature (bank 1 sensor 1), 45 °C
 //
 // Any other PID gets no answer, as on a real car. In "broadcast" mode it also
 // sends a frame on 0x100 every 10 ms, the kind of chatter an ungatewayed bus
@@ -40,6 +48,12 @@
 //                 traffic where no ECU answers OBD), or answer again
 //   SECOND / ONE  add a transmission ECU (0x7E9, answers first, PIDs 01 and
 //                 0D only: no RPM or throttle), or go back to the engine alone
+//   SILENT xx     claim PID xx (hex) is supported but never answer it
+//   REFUSE xx     answer PID xx with "not supported" (negative response 31)
+//   NORMAL        answer every supported PID again
+//   DIRECT OFF    ignore requests to 0x7E0, answering only 0x7DF, like a
+//                 gateway that passes only functional requests; DIRECT ON
+//                 answers both again
 //   S             print the status line now
 //
 // Target: Seeed XIAO ESP32C6, serial console at 115200. Leave the CAN Pal's
@@ -76,6 +90,9 @@ uint32_t bitrate = 500000;
 bool gatewayMode = false;
 bool answering = true;
 bool hidePolled = false;  // HIDE: no RPM or throttle
+int silentPid = -1;       // SILENT: claimed but never answered
+int refusePid = -1;       // REFUSE: answered "not supported"
+bool directAnswered = true;  // DIRECT OFF: requests to 0x7E0 ignored
 bool muted = false;       // MUTE: chatter, but no replies
 bool secondEcu = false;   // SECOND: a transmission ECU answers too, first
 uint32_t replyDelayMs = 2;
@@ -120,25 +137,50 @@ float throttleNow(uint32_t ms) { return (ms % 5000) / 50.0f; }  // 0..100 % ever
 uint8_t pidData(uint8_t pid, uint32_t ms, uint8_t (&d)[4]) {
   if (hidePolled && (pid == 0x0C || pid == 0x11)) return 0;
   switch (pid) {
-    case 0x00:  // supported 01-20: 05, 0C, 0D, 0F, 11 and 20
+    case 0x00:  // supported 01-20: 05, 0B, 0C, 0D, 0F, 11 and 20
       // Bit 7 of A is PID 01, bit 0 of D is PID 20.
       d[0] = 0x08;  // 05
-      d[1] = hidePolled ? 0x0A : 0x1A;  // 0C (unless hidden), 0D, 0F
+      d[1] = hidePolled ? 0x2A : 0x3A;  // 0B, 0C (unless hidden), 0D, 0F
       d[2] = hidePolled ? 0x00 : 0x80;  // 11 (unless hidden)
       d[3] = 0x01;  // 20: more support data follows
       return 4;
-    case 0x20:  // supported 21-40: none here, 41-60 next
+    case 0x20:  // supported 21-40: 2F, 33, and 40 (more follows)
       d[0] = 0x00;
-      d[1] = 0x00;
-      d[2] = 0x00;
+      d[1] = 0x02;  // 2F
+      d[2] = 0x20;  // 33
       d[3] = 0x01;  // 40
       return 4;
-    case 0x40:  // supported 41-60: 46
-      d[0] = 0x04;
-      d[1] = 0x00;
+    case 0x40:  // supported 41-60: 46, 49, 5C, and 60 (more follows)
+      d[0] = 0x04;  // 46
+      d[1] = 0x80;  // 49
       d[2] = 0x00;
+      d[3] = 0x11;  // 5C, 60
+      return 4;
+    case 0x60:  // supported 61-80: 77
+      d[0] = 0x00;
+      d[1] = 0x00;
+      d[2] = 0x02;  // 77
       d[3] = 0x00;
       return 4;
+    case 0x0B:
+      d[0] = static_cast<uint8_t>(30.0f + throttleNow(ms) * 1.7f);
+      return 1;
+    case 0x33:
+      d[0] = 101;
+      return 1;
+    case 0x2F:
+      d[0] = static_cast<uint8_t>(60 * 255 / 100);
+      return 1;
+    case 0x49:
+      d[0] = static_cast<uint8_t>(throttleNow(ms) * 255.0f / 100.0f);
+      return 1;
+    case 0x5C:
+      d[0] = 100 + 40;
+      return 1;
+    case 0x77:
+      d[0] = 0x01;  // bank 1 sensor 1 present
+      d[1] = 45 + 40;
+      return 2;
     case 0x05:
       d[0] = 90 + 40;
       return 1;
@@ -199,7 +241,22 @@ void sendReply(uint32_t id, uint8_t pid, const uint8_t* d, uint8_t n) {
   }
 }
 
+void refuse(uint8_t pid) {
+  twai_message_t m = {};
+  m.identifier = kReplyId;
+  m.data_length_code = 8;
+  const uint8_t d[8] = {0x03, 0x7F, 0x01, 0x31, 0x55, 0x55, 0x55, 0x55};  // request out of range
+  memcpy(m.data, d, 8);
+  (void)pid;
+  if (twai_transmit(&m, pdMS_TO_TICKS(10)) == ESP_OK) replies++;
+}
+
 void reply(uint8_t pid) {
+  if (pid == silentPid) return;
+  if (pid == refusePid) {
+    refuse(pid);
+    return;
+  }
   uint8_t d[4] = {};
   const uint8_t n = pidData(pid, millis(), d);
   if (n == 0) {
@@ -221,6 +278,7 @@ void handleFrame(const twai_message_t& m) {
   if (m.extd || (m.identifier != kFunctionalId && m.identifier != kPhysicalId && !toTcm)) return;
   if (m.data_length_code < 3 || m.data[0] != 0x02 || m.data[1] != 0x01) return;
   requests++;
+  if (!directAnswered && m.identifier == kPhysicalId) return;
   if (!answering || muted) return;
   // The transmission answers a functional request before the engine does.
   if (secondEcu && m.identifier != kPhysicalId) tcmReply(m.data[2]);
@@ -246,6 +304,9 @@ void printStatus() {
                 millis() / 1000, gatewayMode ? "gateway" : "broadcast", bitrate / 1000, answering ? "answering" : "OFF",
                 muted ? ", MUTED" : "", secondEcu ? ", +TCM 0x7E9" : "", hidePolled ? ", RPM+throttle HIDDEN" : "", replyDelayMs, requests, replies, unsupported, chatterSent, s.tx_error_counter, s.rx_error_counter,
                 s.state == TWAI_STATE_BUS_OFF ? " BUS OFF" : "", busOffRecoveries);
+  if (silentPid >= 0) Serial.printf("  PID %02X: claimed, never answered (SILENT)\n", silentPid);
+  if (!directAnswered) Serial.printf("  requests to 0x7E0 ignored (DIRECT OFF)\n");
+  if (refusePid >= 0) Serial.printf("  PID %02X: answered \"not supported\" (REFUSE)\n", refusePid);
 }
 
 void handleLine(String cmd) {
@@ -261,6 +322,13 @@ void handleLine(String cmd) {
     hidePolled = true;
   } else if (cmd == "SHOW") {
     hidePolled = false;
+  } else if (cmd.startsWith("SILENT ") || cmd.startsWith("REFUSE ")) {
+    const int pid = static_cast<int>(strtol(cmd.substring(7).c_str(), nullptr, 16));
+    if (cmd.startsWith("SILENT ")) silentPid = pid; else refusePid = pid;
+  } else if (cmd == "DIRECT OFF" || cmd == "DIRECT ON") {
+    directAnswered = cmd == "DIRECT ON";
+  } else if (cmd == "NORMAL") {
+    silentPid = refusePid = -1;
   } else if (cmd == "SECOND" || cmd == "ONE") {
     secondEcu = cmd == "SECOND";
   } else if (cmd == "MUTE") {
@@ -274,7 +342,7 @@ void handleLine(String cmd) {
     const long v = cmd.substring(6).toInt();
     if (v >= 0 && v <= 100) replyDelayMs = static_cast<uint32_t>(v);
   } else if (cmd != "S") {
-    Serial.printf("Unknown '%s': GATEWAY, BROADCAST, RATE 500|250, DELAY n, OFF, ON, HIDE, SHOW, SECOND, ONE, MUTE, UNMUTE, S\n", cmd.c_str());
+    Serial.printf("Unknown '%s': GATEWAY, BROADCAST, RATE 500|250, DELAY n, OFF, ON, HIDE, SHOW, SECOND, ONE, SILENT xx, REFUSE xx, NORMAL, DIRECT OFF|ON, MUTE, UNMUTE, S\n", cmd.c_str());
     return;
   }
   printStatus();
@@ -299,7 +367,7 @@ void setup() {
   Serial.println();
   Serial.println("Gnimu-CAN fake ECU");
   Serial.printf("CAN: %s at %lu kbit/s\n", startCan() ? "started" : "FAILED", bitrate / 1000);
-  Serial.println("Commands: GATEWAY, BROADCAST, RATE 500|250, DELAY n, OFF, ON, HIDE, SHOW, SECOND, ONE, MUTE, UNMUTE, S");
+  Serial.println("Commands: GATEWAY, BROADCAST, RATE 500|250, DELAY n, OFF, ON, HIDE, SHOW, SECOND, ONE, SILENT xx, REFUSE xx, NORMAL, DIRECT OFF|ON, MUTE, UNMUTE, S");
   printStatus();
 }
 

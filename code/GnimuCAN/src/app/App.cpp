@@ -8,6 +8,7 @@
 #include <stdio.h>
 
 #include "../core/BleJson.h"
+#include "../core/ConsoleHelp.h"
 #include "../core/DeviceId.h"
 #include "../core/Obd2.h"
 #include "../core/TextOut.h"
@@ -36,11 +37,57 @@ uint32_t nowMs() { return static_cast<uint32_t>(PlatformClock::nowUs() / 1000); 
 constexpr uint8_t kCapabilities = frame::kCapVehicle | frame::kCapPower;
 
 
-// The polled channels, in App's kRpmChannel, kThrottleChannel order.
-const uint8_t kPollPids[] = {0x0C, 0x11};
-const uint32_t kPollPeriodsMs[] = {config::kRpmPeriodMs, config::kThrottlePeriodMs};
-const char* const kPollNames[] = {"RPM", "Throttle"};
-const char* const kPollUnits[] = {"rpm", "%"};
+// The OBD channels: Config.h's kObdPolls, with each one's decoder, then a
+// slot for each helper PID (core/Obd2Pids.h), polled only when an enabled
+// channel subtracts it.
+constexpr size_t kChannels = config::kObdChannelCount;
+struct PollTable {
+  PollChannelConfig channels[kChannels];
+  const obd2::PidDecoder* decoders[kChannels];
+  bool fills[kChannels];      // fills its frame field (helpers don't)
+  size_t minus[kChannels];    // the helper channel subtracted; kChannels for none
+  uint8_t wanted[kChannels];  // enabled PIDs in table order: what discovery looks for
+  size_t wantedCount;
+  size_t rpm;                 // the engine-speed channel; kChannels if there's none
+};
+
+const PollTable& pollTable() {
+  static const PollTable t = [] {
+    PollTable p = {};
+    p.rpm = kChannels;
+    for (size_t h = 0; h < obd2::kHelperDecoderCount; h++) {
+      const size_t i = config::kObdPollCount + h;
+      p.decoders[i] = &obd2::kHelperDecoders[h];
+      p.channels[i] = {obd2::kHelperDecoders[h].pid, 0, obd2::bytesNeeded(obd2::kHelperDecoders[h])};
+      p.minus[i] = kChannels;
+    }
+    for (size_t i = 0; i < config::kObdPollCount; i++) {
+      const obd2::PidDecoder* d = obd2::decoderFor(config::kObdPolls[i].field);
+      const uint32_t period = config::kObdPolls[i].periodMs;
+      p.decoders[i] = d;
+      p.channels[i] = {d->pid, period, obd2::bytesNeeded(*d)};
+      p.fills[i] = true;
+      p.minus[i] = kChannels;
+      if (period > 0) p.wanted[p.wantedCount++] = d->pid;
+      if (d->field == frame::Field::EngineSpeed) p.rpm = i;
+      if (d->minusPid == 0) continue;
+      for (size_t h = 0; h < obd2::kHelperDecoderCount; h++) {
+        if (obd2::kHelperDecoders[h].pid != d->minusPid) continue;
+        p.minus[i] = config::kObdPollCount + h;
+        if (period > 0) p.channels[p.minus[i]].periodMs = config::kHelperPeriodMs;
+      }
+    }
+    return p;
+  }();
+  return t;
+}
+
+// How long a channel's value counts as fresh: kStalePeriods of its period,
+// and never less than kChannelStaleMs.
+uint32_t staleAfterMs(uint32_t periodMs) {
+  return periodMs * config::kStalePeriods > config::kChannelStaleMs ? periodMs * config::kStalePeriods
+                                                                    : config::kChannelStaleMs;
+}
 
 void logSupply(Console& console, const SupplyStatus& s) {
   const CentiVolts v = centiVolts(s.volts);
@@ -60,7 +107,11 @@ App::App()
       discovery_({config::kObdReplyTimeoutMs,
                   {config::kDiscoveryRetryMs, config::kDiscoveryBackoffMs, config::kDiscoveryMaxBackoffMs,
                    config::kDiscoveryTriesPerStep}}),
-      poller_(kPollPids, kPollPeriodsMs, config::kObdReplyTimeoutMs),
+      // The request cap as a minimum gap, 1 ms under so the can job's tick
+      // jitter can't make a request wait a whole extra tick.
+      poller_(pollTable().channels, {config::kObdReplyTimeoutMs, 1000 / config::kMaxObdRequestsPerSec - 1,
+                                     config::kSilentAfterTimeouts, config::kSilentRetryMs,
+                                     config::kAskEveryoneAfterTimeouts}),
       sleepPolicy_({config::kSleepAfterParkedS * 1000, config::kBusSilentMs, config::kSupplyCutoffHoldMs,
                     config::kNoSupplyV, config::kSleepGraceMs}),
       statusLed_({config::kLedBlinkHalfMs, config::kLedFaultHalfMs, config::kLedFlashOnMs,
@@ -69,8 +120,6 @@ App::App()
                    canSummary_, obdSummary_, sleepView_, ble_, deviceId_, reset_) {
   // Here, not in the class: GCC only evaluates it once App is complete.
   static_assert(jobSpecsValid(kJobSpecs), "job specs out of id order, unnamed, or with a zero period");
-  static_assert(kPollChannels <= kMaxObdChannels, "more polled channels than ObdSummary holds");
-  static_assert(sizeof(kPollPids) == kPollChannels, "kPollPids out of step with the channel enum");
 }
 
 void App::begin() {
@@ -128,11 +177,14 @@ void App::begin() {
   }
   scheduler_.start();
   console_.log("%s.", stateName(machine_.state()));
-  console_.log("Commands end with Enter: D = report, C = clear statistics counters, V = version, "
-               "P = protocol, R = restart, W = stay awake on/off.");
-  console_.log("L = 1s status on/off (up to %lu lines), N = N status reports (0-%lu).",
-               static_cast<unsigned long>(config::kStatusMaxCount),
-               static_cast<unsigned long>(config::kStatusMaxCount));
+  // The command help, a log line per line, so the event log keeps it too.
+  char help[512];
+  const size_t helpLen = formatConsoleHelp(help, sizeof(help), config::kStatusMaxCount);
+  for (size_t start = 0, i = 0; i < helpLen; i++) {
+    if (help[i] != '\n') continue;
+    console_.log("%.*s", static_cast<int>(i - start), help + start);
+    start = i + 1;
+  }
 }
 
 void App::apply(Transition t) {
@@ -262,7 +314,7 @@ void App::discover() {
 void App::finishDiscovery(uint32_t now) {
   step_ = CanStep::Idle;
   const uint32_t rate = search_.trafficRate();
-  const EcuChoice c = discovery_.finish(kPollPids, kPollChannels, now);
+  const EcuChoice c = discovery_.finish(pollTable().wanted, pollTable().wantedCount, now);
   obdSummary_.answeredEcus = c.answered;
   if (c.answered == 0) {
     console_.log("OBD: no ECU answered at %lu kbit/s (try %lu) - asking again in %lu s",
@@ -288,18 +340,15 @@ void App::finishDiscovery(uint32_t now) {
   const uint32_t responseId = obd2::kFirstResponseId + c.ecu;
   // An ECU's physical request ID is its response ID minus 8.
   const uint32_t requestId = responseId - 8;
-  poller_.start(requestId, c.bitmap, now);
+  poller_.start(requestId, c.bitmap, now, askEveryone_);
   console_.log("OBD: ECU 0x%03lX chosen, polling via 0x%03lX \xE2\x9C\x85", static_cast<unsigned long>(responseId),
-               static_cast<unsigned long>(requestId));
-  for (size_t i = 0; i < kPollChannels; i++) {
-    const PollChannel& ch = poller_.channel(i);
-    console_.log("OBD: PID %02X %s %s", static_cast<unsigned>(ch.pid), kPollNames[i],
-                 ch.supported ? "supported \xE2\x9C\x85" : "not supported - not polled \xE2\x9D\x8C");
-  }
+               static_cast<unsigned long>(poller_.sendId()));
+  supportLogged_ = false;
+  logSupport();
   obdSummary_.ecuFound = true;
   obdSummary_.nothingToPoll = false;
   obdSummary_.responseId = responseId;
-  obdSummary_.requestId = requestId;
+  obdSummary_.requestId = poller_.sendId();
   // The probe count starts over; if the car is lost later, the first probe
   // may go as soon as the bus is silent.
   probe_.reset();
@@ -362,28 +411,62 @@ void App::trafficStopped() {
   listenAt(search_.rate());
 }
 
+// Once every channel's support is known (the later bitmaps read), which are
+// polled, once per vehicle session.
+void App::logSupport() {
+  if (supportLogged_ || !poller_.supportKnown()) return;
+  supportLogged_ = true;
+  for (size_t i = 0; i < kChannels; i++) {
+    const PollChannel& ch = poller_.channel(i);
+    if (ch.state == ChannelState::Off) continue;
+    console_.log("OBD: PID %02X %s %s", static_cast<unsigned>(ch.pid), pollTable().decoders[i]->name,
+                 ch.asked() ? "supported \xE2\x9C\x85" : "not supported - not polled \xE2\x9D\x8C");
+  }
+}
+
 void App::refreshObdSummary(uint32_t nowMs) {
-  obdSummary_.channelCount = kPollChannels;
-  for (size_t i = 0; i < kPollChannels; i++) {
+  obdSummary_.channelCount = kChannels;
+  for (size_t i = 0; i < kChannels; i++) {
     const PollChannel& c = poller_.channel(i);
+    const obd2::PidDecoder& d = *pollTable().decoders[i];
     ObdChannelView& v = obdSummary_.channels[i];
-    v.name = kPollNames[i];
-    v.unit = kPollUnits[i];
+    v.name = d.name;
+    v.unit = d.unit;
     v.pid = c.pid;
-    v.supported = c.supported;
+    v.state = c.state;
+    v.periodMs = c.targetPeriodMs;
     v.requests = c.requests;
     v.replies = c.replies;
     v.timeouts = c.timeouts;
+    v.replyAvgMs = c.replies ? c.replyMsTotal / c.replies : 0;
+    v.replyMaxMs = c.replyMsMax;
     v.ageMs = c.valid ? nowMs - c.lastReplyMs : 0;
-    v.fresh = obdSummary_.ecuFound && c.valid && v.ageMs <= config::kChannelStaleMs;
-    v.value = !c.valid ? 0.0f : i == kRpmChannel ? decodeRpm(c.data) : decodePercent(c.data);
+    v.fresh = obdSummary_.ecuFound && c.valid && v.ageMs <= staleAfterMs(c.targetPeriodMs);
+    v.value = c.valid ? obd2::decode(d, c.data) : 0.0f;
+    const size_t m = pollTable().minus[i];
+    if (m < kChannels) {
+      // A difference: fresh only while the subtracted helper is too.
+      const PollChannel& h = poller_.channel(m);
+      const bool helperFresh = h.valid && nowMs - h.lastReplyMs <= staleAfterMs(h.targetPeriodMs);
+      v.fresh = v.fresh && helperFresh;
+      if (h.valid) v.value -= obd2::decode(*pollTable().decoders[m], h.data);
+    }
   }
   obdSummary_.activity = activity();
 }
 
+// Fresh RPM at or above the running threshold: the engine is running.
+bool App::rpmFresh(float& rpm) const {
+  if (pollTable().rpm >= kChannels) return false;
+  const ObdChannelView& v = obdSummary_.channels[pollTable().rpm];
+  rpm = v.value;
+  return v.fresh;
+}
+
 VehicleActivity App::activity() const {
-  const ObdChannelView& rpm = obdSummary_.channels[kRpmChannel];
-  return vehicleActivity(rpm.fresh, rpm.value, config::kEngineRunningMinRpm, supply_.status().level);
+  float rpm = 0.0f;
+  const bool fresh = rpmFresh(rpm);
+  return vehicleActivity(fresh, rpm, config::kEngineRunningMinRpm, supply_.status().level);
 }
 
 void App::makeProbe() {
@@ -430,7 +513,7 @@ void App::tick() {
   PlatformClock::sleepUntilUs(scheduler_.tick());
 }
 
-// Every 10 ms while the device is up. Polling: matches replies, times out the
+// Every 5 ms while the device is up. Polling: matches replies, times out the
 // request in flight, sends the next, and notices the car going quiet.
 // Waiting: until clean traffic has been heard, keeps checking the bit rate
 // and makes gateway probes when the policy allows; then asks for an ECU.
@@ -466,6 +549,14 @@ void App::canJob() {
 
   if (polling) {
     poller_.checkTimeout(now);
+    if (poller_.takeSwitchedToEveryone()) {
+      // Remembered for the rest of the boot: the same car, the same gateway.
+      askEveryone_ = true;
+      obdSummary_.requestId = poller_.sendId();
+      console_.log("OBD: no replies to requests sent to 0x%03lX - asking everyone (0x%03lX) instead",
+                   static_cast<unsigned long>(poller_.requestId()), static_cast<unsigned long>(poller_.sendId()));
+    }
+    logSupport();
     refreshObdSummary(now);
     if (poller_.silentForMs(now) >= config::kVehicleLostMs) {
       vehicleLost();
@@ -514,10 +605,10 @@ void App::emitJob() {
             frameStateCode(machine_.state()));
   const SupplyStatus& s = supply_.status();
   if (s.valid) enc.set(frame::Field::SupplyVoltage, s.volts);
-  const ObdChannelView& rpm = obdSummary_.channels[kRpmChannel];
-  const ObdChannelView& throttle = obdSummary_.channels[kThrottleChannel];
-  if (rpm.fresh) enc.set(frame::Field::EngineSpeed, rpm.value);
-  if (throttle.fresh) enc.set(frame::Field::ThrottlePosition, throttle.value);
+  for (size_t i = 0; i < kChannels; i++) {
+    const ObdChannelView& v = obdSummary_.channels[i];
+    if (v.fresh && pollTable().fills[i]) enc.set(pollTable().decoders[i]->field, v.value);
+  }
   ble_.send(enc.finish(), frame::kFrameBytes);
 }
 
@@ -537,8 +628,9 @@ void App::powerJob() {
   }
 
   const uint32_t now = nowMs();
-  const ObdChannelView& rpm = obdSummary_.channels[kRpmChannel];
-  const SleepInputs in = {rpm.fresh, rpm.fresh && rpm.value >= config::kEngineRunningMinRpm, s,
+  float rpm = 0.0f;
+  const bool rpmIsFresh = rpmFresh(rpm);
+  const SleepInputs in = {rpmIsFresh, rpmIsFresh && rpm >= config::kEngineRunningMinRpm, s,
                           search_.silentForMs(now), stayAwake_};
   const SleepDecision d = sleepPolicy_.update(in, now);
   // What changes as it runs; the rest of sleepView_ is set once, in begin().
@@ -550,7 +642,98 @@ void App::powerJob() {
   if (d == SleepDecision::Cutoff) goToSleep(SleepKind::Cutoff);
 }
 
-void App::bleJob() { ble_.update(); }
+// Every 10 ms: BLE housekeeping, and one notification of a Console reply
+// when one is going out. One per run keeps the frames, notified by the emit
+// job, ahead of it.
+void App::bleJob() {
+  ble_.update();
+  if (!ble_.connected()) {
+    // The client left: whatever it asked for goes with it.
+    bleReply_.cancel();
+    bleGate_.cancel();
+    diagnostics_.armBleStatus(0);
+    return;
+  }
+  if (bleReply_.sending()) {
+    const char* data = nullptr;
+    const size_t n = bleReply_.chunk(ble_.mtu(), data);
+    switch (ble_.sendConsole(data, n)) {
+      case ConsoleSend::Sent:
+        bleReply_.sent(n);
+        break;
+      case ConsoleSend::Busy:
+        break;  // the stack is full: the same chunk next run
+      case ConsoleSend::NotListening:
+        bleReply_.cancel();
+        break;
+    }
+  } else {
+    // The last command refused while that reply went out.
+    char echo[kConsoleEchoBytes + 1];
+    if (bleGate_.takeBusy(echo)) bleText(echo, "busy");
+  }
+}
+
+// A one-line Console reply to the BLE client, after the echo line of the
+// command it answers.
+void App::bleText(const char* echo, const char* text) {
+  bleReply_.begin();
+  bleReply_.append(echo, strlen(echo));
+  bleReply_.append(text, strlen(text));
+  bleReply_.append("\n", 1);
+  bleReply_.finish();
+}
+
+// A Console command a BLE client has written: report-only commands answered,
+// anything else refused (Gnimu protocol, docs/frame.md, Console).
+void App::bleCommand() {
+  char raw[kBleCommandMax + 1];
+  if (!ble_.takeCommand(raw)) return;
+  // Every reply starts by naming the command it answers.
+  char echo[kConsoleEchoBytes + 1];
+  switch (bleGate_.command(raw, nowMs(), bleReply_.sending(), echo)) {
+    case ConsoleGate::Action::Ignore:     // only CR or LF
+    case ConsoleGate::Action::BusyLater:  // answered when the reply going out has finished
+      return;
+    case ConsoleGate::Action::BusyNow:
+      bleText(echo, "busy");
+      return;
+    case ConsoleGate::Action::Run:
+      break;
+  }
+  bleEntry_.reset();
+  EntryResult r;
+  for (size_t i = 0; raw[i] != '\0' && r.kind == EntryKind::None; i++) r = bleEntry_.feed(raw[i]);
+  if (r.kind == EntryKind::None) r = bleEntry_.feed('\n');  // a write needs no line ending
+  switch (r.kind) {
+    case EntryKind::None:
+      break;
+    case EntryKind::Command:
+      if (!reportOnly(r.cmd)) {
+        bleText(echo, "not available over BLE without bonding");
+      } else {
+        ConsoleCommand cmd;
+        cmd.kind = r.cmd;
+        cmd.hasArg = r.hasArg;
+        cmd.arg = r.arg;
+        bleReply_.begin();
+        bleReply_.append(echo, strlen(echo));
+        bleReply_.commit(diagnostics_.formatBleReply(cmd, bleReply_.space(), bleReply_.room()));
+        bleReply_.finish();
+      }
+      break;
+    case EntryKind::Count:
+      diagnostics_.armBleStatus(r.count);
+      bleText(echo, r.count ? "status line once a second" : "status line off");
+      break;
+    case EntryKind::TooLarge:
+      bleText(echo, "number out of range");
+      break;
+    case EntryKind::Unrecognised:
+      bleText(echo, "unrecognised command");
+      break;
+  }
+}
 
 void App::ledJob() {
   StatusLedPort::write(statusLed_.update(ledStateFor(machine_.state(), ble_.connected()), nowMs()));
@@ -575,10 +758,21 @@ void App::consoleJob() {
     case CommandKind::Version:
     case CommandKind::Protocol:
     case CommandKind::ToggleStatus:
+    case CommandKind::Events:
       break;
   }
   diagnostics_.handle(cmd);
-  diagnostics_.tick(PlatformClock::nowUs());
+  bleCommand();
+  char line[kStatusLineMaxBytes];
+  const size_t n = diagnostics_.tick(PlatformClock::nowUs(), line, sizeof(line));
+  // A status line for the BLE client, unless a reply is still going out.
+  if (n > 0 && !bleReply_.sending()) {
+    bleReply_.begin();
+    bleReply_.append(kStatusLineEcho, strlen(kStatusLineEcho));
+    bleReply_.append(line, n);
+    bleReply_.append("\n", 1);
+    bleReply_.finish();
+  }
 }
 
 uint32_t App::checkIntervalS(SleepKind kind) {

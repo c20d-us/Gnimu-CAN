@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -26,10 +27,15 @@ struct JobTable {
   uint32_t loops;
 };
 
-// The console's D-report buffer. test_report checks that the worst case
+// The console's D-report buffer. test_text checks that the worst case
 // (every counter at 10 digits) fits, so a report that grows fails a test
 // rather than losing its last lines on the device.
-constexpr size_t kReportMaxBytes = 2560;
+constexpr size_t kReportMaxBytes = 4096;
+
+// The widest a report line gets below the job table, with counters at any
+// size a device reaches in practice (test_text checks it): narrow enough to
+// read unwrapped on a phone. A longer line wraps onto an indented second.
+constexpr size_t kReportLineColumns = 73;
 
 // Text of the on-request diagnostics report, formatted into a caller buffer so
 // it can be tested on a host. Output is truncated, never overrun.
@@ -133,7 +139,7 @@ inline size_t formatReport(char *buf, size_t cap, const JobTable &t, const Devic
     o.put("Supply: no reading yet\n");
   }
   if (d.can.running) {
-    o.put("CAN: %s at %lu kbit/s, TEC %lu, REC %lu, bus errors %lu, missed %lu%s\n",
+    o.put("CAN: %s at %lu kbit/s, TEC %lu, REC %lu,\n     bus errors %lu, missed %lu%s\n",
           d.can.listenOnly ? "listening" : "active", static_cast<unsigned long>(d.can.bitrate / 1000),
           static_cast<unsigned long>(d.can.txErrors), static_cast<unsigned long>(d.can.rxErrors),
           static_cast<unsigned long>(d.can.busErrors), static_cast<unsigned long>(d.can.rxMissed),
@@ -152,29 +158,43 @@ inline size_t formatReport(char *buf, size_t cap, const JobTable &t, const Devic
   char ids[obd2::kResponseIdsTextMax];
   obd2::formatResponseIds(ids, sizeof(ids), d.obd.answeredEcus);
   if (d.obd.ecuFound) {
-    o.put("OBD: ECU 0x%03lX, requests to 0x%03lX (answered: %s)\n", static_cast<unsigned long>(d.obd.responseId),
-          static_cast<unsigned long>(d.obd.requestId), ids);
+    o.put("OBD: ECU 0x%03lX, requests to 0x%03lX%s\n     answered: %s\n", static_cast<unsigned long>(d.obd.responseId),
+          static_cast<unsigned long>(d.obd.requestId), d.obd.requestId == obd2::kFunctionalRequestId ? ", everyone" : "",
+          ids);
   } else if (d.obd.nothingToPoll) {
-    o.put("OBD: answered: %s - none supports the polled PIDs, asking again later\n", ids);
+    o.put("OBD: answered: %s\n     none supports the polled PIDs, asking again later\n", ids);
   } else {
     o.put("OBD: no ECU\n");
   }
   for (size_t i = 0; i < d.obd.channelCount && i < kMaxObdChannels; i++) {
     const ObdChannelView &c = d.obd.channels[i];
+    if (c.state == ChannelState::Off) continue;
     o.put("OBD: PID %02X %s: ", static_cast<unsigned>(c.pid), c.name);
     if (!d.obd.ecuFound) {
       o.put("not polling");
-    } else if (!c.supported) {
+    } else if (c.state == ChannelState::Unknown) {
+      o.put("checking support");
+    } else if (c.state == ChannelState::Unsupported) {
       o.put("not supported");
+    } else if (c.state == ChannelState::Refused) {
+      o.put("refused by the ECU");
     } else {
-      if (c.fresh) {
-        const long tenths = static_cast<long>(c.value * 10.0f + 0.5f);
-        o.put("%ld.%ld %s", tenths / 10, tenths % 10, c.unit);
+      // Two lines: the value, period and requests; then the replies.
+      if (c.state == ChannelState::Silent) {
+        o.put("NOT ANSWERING");
+      } else if (c.fresh) {
+        const long tenths = static_cast<long>(fabsf(c.value) * 10.0f + 0.5f);
+        o.put("%s%ld.%ld %s", c.value < 0 ? "-" : "", tenths / 10, tenths % 10, c.unit);
       } else {
         o.put("stale");
       }
-      o.put(", requests %lu, replies %lu, timeouts %lu", static_cast<unsigned long>(c.requests),
-            static_cast<unsigned long>(c.replies), static_cast<unsigned long>(c.timeouts));
+      o.put(", every %lu ms, requests %lu\n     replies %lu, timeouts %lu", static_cast<unsigned long>(c.periodMs),
+            static_cast<unsigned long>(c.requests), static_cast<unsigned long>(c.replies),
+            static_cast<unsigned long>(c.timeouts));
+      if (c.replies) {
+        o.put(", reply avg %lu, max %lu ms", static_cast<unsigned long>(c.replyAvgMs),
+              static_cast<unsigned long>(c.replyMaxMs));
+      }
     }
     o.put("\n");
   }
@@ -189,16 +209,16 @@ inline size_t formatReport(char *buf, size_t cap, const JobTable &t, const Devic
   } else {
     o.put("Sleep: not parked");
   }
-  o.put(", slept %lu times since power-up\n", static_cast<unsigned long>(d.sleep.sleepCount));
+  o.put("\n       slept %lu times since power-up\n", static_cast<unsigned long>(d.sleep.sleepCount));
   if (d.sleep.woke) {
     const CentiVolts at = centiVolts(d.sleep.sleptAtV), lo = centiVolts(d.sleep.checkMinV),
                      hi = centiVolts(d.sleep.checkMaxV), w = centiVolts(d.sleep.wokeAtV);
-    o.put("Sleep: this boot woke for %s after %lu checks asleep %s: slept at %lu.%02luV, checks read "
-          "%lu.%02lu-%lu.%02luV, woke at %lu.%02luV\n",
+    o.put("Sleep: this boot woke for %s\n       after %lu checks asleep %s\n"
+          "       slept at %lu.%02luV, checks read %lu.%02lu-%lu.%02luV, woke at %lu.%02luV\n",
           d.sleep.wokeFor, static_cast<unsigned long>(d.sleep.checks), d.sleep.asleepFor, at.whole, at.hundredths,
           lo.whole, lo.hundredths, hi.whole, hi.hundredths, w.whole, w.hundredths);
   }
-  o.put("BLE: %s, MTU %u, sent %lu, failed %lu, refused %lu, max send %lu\xCE\xBCs\n",
+  o.put("BLE: %s, MTU %u, sent %lu, failed %lu,\n     refused %lu, max send %lu\xCE\xBCs\n",
         d.ble.connected ? "connected" : "disconnected", static_cast<unsigned>(d.ble.stats.mtu),
         static_cast<unsigned long>(d.ble.stats.sent), static_cast<unsigned long>(d.ble.stats.failed),
         static_cast<unsigned long>(d.ble.stats.refused), static_cast<unsigned long>(d.ble.stats.maxSendUs));

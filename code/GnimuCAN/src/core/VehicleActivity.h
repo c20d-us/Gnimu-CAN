@@ -51,8 +51,4 @@ inline VehicleActivity vehicleActivity(bool rpmFresh, float rpm, float runningMi
   return VehicleActivity::Unknown;
 }
 
-// Mode 01 decodes for the channels Gnimu-CAN polls, from the reply's A..D.
-inline float decodeRpm(const uint8_t* d) { return ((d[0] << 8) | d[1]) / 4.0f; }
-inline float decodePercent(const uint8_t* d) { return d[0] * 100.0f / 255.0f; }
-
 }  // namespace gnimu

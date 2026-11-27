@@ -71,7 +71,9 @@ bool CanPort::start(uint32_t bitrate, bool listenOnly) {
   twai_general_config_t general = TWAI_GENERAL_CONFIG_DEFAULT(
       static_cast<gpio_num_t>(board::kCanTxPin), static_cast<gpio_num_t>(board::kCanRxPin),
       listenOnly ? TWAI_MODE_LISTEN_ONLY : TWAI_MODE_NORMAL);
-  general.rx_queue_len = 32;
+  // Room for about half a second of a busy OBD port (the M2's carries about
+  // 250 frames a second), so a held-up can job doesn't lose a reply.
+  general.rx_queue_len = 128;
   general.tx_queue_len = 1;
   general.alerts_enabled = TWAI_ALERT_TX_SUCCESS | TWAI_ALERT_TX_FAILED | TWAI_ALERT_BUS_ERROR | TWAI_ALERT_BUS_OFF;
   const twai_filter_config_t filter = TWAI_FILTER_CONFIG_ACCEPT_ALL();

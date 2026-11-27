@@ -64,7 +64,7 @@ The same layers as Gnimu, plus `protocol/`, under `code/GnimuCAN/src/`, with the
 
 | Layer | What's in it |
 |---|---|
-| `core/` | Plain C++, host-tested: the scheduler, the run-state machine, the supply monitor, the bus search (listen windows, silence for gateway probes, starting over on a quiet bus), OBD discovery (every reply in P2, choosing the ECU, the backoff), the gateway probe policy and probe sequence, the OBD-II request/reply codec, the poller, vehicle activity, the sleep policy and wake check, the LED patterns, the report and status-line formatters, and the BLE JSON documents. |
+| `core/` | Plain C++, host-tested: the scheduler, the run-state machine, the supply monitor, the bus search (listen windows, silence for gateway probes, starting over on a quiet bus), OBD discovery (every reply in P2, choosing the ECU, the backoff), the gateway probe policy and probe sequence, the OBD-II request/reply codec, the Mode 01 decoders, the poller, vehicle activity, the sleep policy and wake check, the LED patterns, the report and status-line formatters, the event log, the BLE Console reply, and the BLE JSON documents. |
 | `platform/` | The board: clock, watchdog, reset reason, hardware ID, the TWAI controller and silent pin (`CanPort`), the supply ADC, the LED, the console port, deep sleep and the record kept across it (`DeepSleep`). ESP32-C6 only for now, but kept behind headers so `core/` stays testable. |
 | `peripherals/` | The BLE transport: the Gnimu service on NimBLE, through the Arduino BLE library. |
 | `protocol/` | The Gnimu frame encoder and layout, the protocol repo's C++ reference, copied in. |
@@ -94,7 +94,7 @@ Collecting and emitting are independent:
 
 Gnimu-CAN has no GNSS, so under the protocol's [rate rule](https://github.com/c20d-us/Gnimu-protocol/blob/main/docs/frame.md#rate) it sends at a fixed rate of its own, and the app aligns its data to the app's GNSS source. (A device with GNSS sends one frame per GNSS solution instead; an all-in-one device with CAN would pace its frames by GNSS too.)
 
-**20 Hz is a starting point, not a design limit.** The rate is one setting, `kEmitRateHz` in `Config.h`, and the `emit` job's period follows from it. The plan is to raise it as far as testing shows is worthwhile, or lower it if something can't keep up. Somewhere in the 30-50 Hz range is the target, above the Gnimu GNSS rates for the reasons below.
+**30 Hz, with 50 Hz as the upper end of the target.** The rate is one setting, `kEmitRateHz` in `Config.h`, and the `emit` job's period follows from it. Somewhere in the 30-50 Hz range is the target, above the Gnimu GNSS rates for the reasons below; testing decides how far up it's worthwhile.
 
 What sets the useful ceiling:
 
@@ -143,34 +143,52 @@ If step 3 hears nothing, there are two possible reasons: the car is off, or the 
   5. It probes again every 10 s for as long as the bus stays silent and the supply stays up. There's no cap, so a car started at any time is found: a parked car that never answers sees one frame every 10 s until the device sleeps, 5 minutes after parking, and wake checks only listen.
 - **Having heard the bus earlier doesn't rule a probe out.** Some gatewayed ports carry traffic only for a few seconds after a diagnostic request, then fall silent until asked again (see the [car-test results](car-test.md#results-hyundai-santa-cruz-2026-11-25)). Silence at both rates is the only condition, since it's what keeps a probe off a live bus at the other rate.
 
-Neither the probe nor discovery waits inside a job. Each sends its request and returns. Later `can` runs, every 10 ms, check whether the controller has reported the frame sent, take the replies as they arrive, or give up at the timeout. Until the step finishes, the rate check and probe policy stay paused. Waiting inside the job would hold BLE, the LED and the console for the whole timeout.
+Neither the probe nor discovery waits inside a job. Each sends its request and returns. Later `can` runs, every 5 ms, check whether the controller has reported the frame sent, take the replies as they arrive, or give up at the timeout. Until the step finishes, the rate check and probe policy stay paused. Waiting inside the job would hold BLE, the LED and the console for the whole timeout.
 
 **Why 12.4V and not the 13.2V engine-running threshold.** Many modern cars, the BMW F-series among them, use intelligent alternator control: the alternator often stops charging while the engine runs, and the supply sits around 12.4–12.8V. A 13.2V trigger would miss those cars. The cost is that a healthy parked battery (about 12.6–12.8V) also passes, so a parked gatewayed car can see probes, one every 10 s until the device sleeps. A voltage log of a drive ([car-test.md](car-test.md)) will show whether it needs adjusting.
 
 ### Polling
 
-- **One request in flight.** The poller sends a request and waits for its reply or for the 50 ms timeout (the ISO 15765-4 P2 limit) before sending the next. It never blocks: the `can` job runs every 10 ms, takes any reply, and sends the next request. That caps polling at about 100 requests per second, above what most cars answer; a faster job period is the change if a car ever outruns it.
-- **A slow ECU.** One that answers later than the 50 ms timeout still gets polled: the device asks again, and a late reply that arrives while the same PID is in flight is taken as its answer, so data keeps coming at a few hertz rather than not at all. A 60 ms ECU gives about 3 Hz per channel, with three requests in four timing out, and is never counted as lost. ISO 15765-4 requires 50 ms, so this shouldn't happen on a real car; if one does answer slowly, a longer timeout (100 ms) would give it much more throughput.
-- **Vehicle lost.** No reply on any channel for 2 seconds: the device logs it, goes back to listening, and returns to WaitingForVehicle. If the port then falls silent, probes start again as soon as it has been silent at both rates.
+- **One request in flight.** The poller sends a request and waits for its reply or for the 50 ms timeout (the ISO 15765-4 P2 limit) before sending the next. It never blocks: the `can` job runs every 5 ms, takes any reply, and sends the next request as soon as the reply arrives, up to the request cap below.
+- **A request cap.** Whatever the channel periods add up to, requests go no faster than `kMaxObdRequestsPerSec` (100 a second, in `Config.h`), so the car's diagnostic bus never sees more.
+- **Replies only from the polled ECU.** A reply counts only if it comes from that ECU's response ID and carries the PID in flight, with enough data bytes to decode.
+- **Direct requests, or ask everyone.** Requests go to the chosen ECU's physical address (`0x7E0` for `0x7E8`). Some gateways pass only functional requests (`0x7DF`) from the OBD port ([car-test results](car-test.md)), so if the first 3 requests of a session all time out, polling asks everyone instead, still taking replies only from the chosen ECU. The switch is logged and remembered for the rest of the boot, and the D report shows `requests to 0x7DF, everyone`. Asking everyone means other ECUs that support a PID may answer too; those replies are ignored, and the request cap bounds the traffic.
+- **Negative responses.** "Not supported" (`0x11`, `0x12`, `0x31`) drops the channel for the session. "Response pending" (`0x78`) restarts the wait. Anything else, such as "busy", settles the request without counting a timeout, and the channel is asked again next period.
+- **Channels that stop answering.** After 3 timeouts in a row, a channel is asked only every 5 s, so it doesn't take the other channels' share of the ECU's replies. It returns to its own rate when it answers. The D report marks it `NOT ANSWERING`.
+- **A slow ECU.** One that answers later than the 50 ms timeout still gets polled: a late reply that arrives while the same PID is in flight is taken as its answer. A 60 ms ECU gives about 3 Hz per channel, with three requests in four timing out. ISO 15765-4 requires 50 ms, so this shouldn't happen on a real car; if one does answer slowly, a longer timeout (100 ms) would give it much more throughput.
+- **Reply times.** The D report gives each channel's average and longest time from request to reply. They're measured in `can` job steps, so they read in multiples of about 5 ms: an average near one step means the job period, not the ECU, is what limits the rate.
+- **Vehicle lost.** No reply from the ECU for 2 seconds: the device logs it, goes back to listening, and returns to WaitingForVehicle. If the port then falls silent, probes start again as soon as it has been silent at both rates.
 - **Throughput is shared.** A car typically answers 20–60 single-PID requests per second. Every polled PID takes a share of that, so 20 Hz of real data for every channel isn't possible on most cars.
-- **Tiered schedule.** Each channel has a target rate, and the poller picks whichever channel is most overdue relative to its own target. v1's two channels both aim for 25 Hz. As channels are added, fast ones such as RPM, throttle and speed get most of the budget, and slow ones such as temperatures about 1 Hz. The status line shows the rate each one actually gets.
+- **Tiered schedule.** Each channel has a target period, and the poller picks whichever channel is most overdue relative to its own. Fast channels such as RPM, throttle and speed get most of the replies, and slow ones such as temperatures about 1 Hz. The status line shows the rate each one actually gets.
 - **Bus-off.** Not handled on its own: a controller that goes bus-off stops getting replies, so after 2 s the vehicle-lost path restarts it in listen-only mode.
-- **Single-frame replies only, for v1.** Every Mode 01 PID fits in one frame. Asking for several PIDs per request raises throughput a lot, but the replies span several frames and need ISO-TP flow control. That's a later step, and the poller's interface leaves room for it.
+- **Single-frame replies only.** Every Mode 01 PID polled fits in one frame. Asking for several PIDs per request raises throughput a lot, but the replies span several frames and need ISO-TP flow control. That's a later step.
 
 ### Channels
 
-The first build sends **RPM and throttle position**, replacing what an ELM327-style OBD-II dongle (such as the Veepeak OBDCheck BLE+) gives AutoXDL today. More channels come later. Each one already has its field in the [Gnimu frame](https://github.com/c20d-us/Gnimu-protocol/blob/main/docs/frame.md), so adding one never changes the frame.
+Which channels are polled, and how often, is the `kObdPolls` table in `Config.h`: one line per channel, naming the frame field it fills and its period. A period of 0 turns a channel off. Order matters: discovery prefers the ECU supporting the first channels, and the status line shows the first four polled. Each channel already has its field in the [Gnimu frame](https://github.com/c20d-us/Gnimu-protocol/blob/main/docs/frame.md), so adding one never changes the frame.
 
-| Channel | PID | Decode | Frame field | In v1 |
+How each PID decodes is fixed by SAE J1979 and lives in `core/Obd2Pids.h`, not in the configuration: value = raw × scale + offset, from one data byte or two, minus a second PID's value for a difference such as boost. A host test checks the decoders against example replies, and `tests/check_obd_spec.py` checks their PIDs against the frame spec's Mode 01 PID column.
+
+| Channel | PID | Decode | Frame field | Default |
 |---|---|---|---|---|
-| RPM | `0x0C` | (256A + B) / 4 | Engine speed (vehicle bit 0) | Yes |
-| Throttle position | `0x11` | A × 100 / 255 % | Throttle position (vehicle bit 1) | Yes |
-| Supply voltage | ADC, divider × 11 | — | Supply voltage (power bit 0) | Yes, from the ADC, not the bus |
-| Coolant temperature | `0x05` | A − 40 °C | Coolant temperature (vehicle bit 4) | Later |
-| Intake air temperature | `0x0F` | A − 40 °C | Intake air temperature (vehicle bit 5) | Later |
-| Ambient air temperature | `0x46` | A − 40 °C | Ambient air temperature (vehicle bit 6) | Later |
+| RPM | `0x0C` | (256A + B) / 4 | Engine speed | 40 ms (25 Hz) |
+| Throttle position | `0x11` | A × 100 / 255 % | Throttle position | 50 ms (20 Hz) |
+| Accelerator pedal | `0x49` | A × 100 / 255 % | Accelerator pedal position | 100 ms (10 Hz) |
+| Vehicle speed | `0x0D` | A km/h | Vehicle speed | 100 ms (10 Hz) |
+| Coolant temperature | `0x05` | A − 40 °C | Coolant temperature | 1 s |
+| Intake air temperature | `0x0F` | A − 40 °C | Intake air temperature | 1 s |
+| Oil temperature | `0x5C` | A − 40 °C | Oil temperature | 1 s |
+| Charge air cooler temperature | `0x77` | B − 40 °C (A says which sensors exist) | Charge air cooler temperature | 1 s |
+| Ambient air temperature | `0x46` | A − 40 °C | Ambient air temperature | 5 s |
+| Fuel level | `0x2F` | A × 100 / 255 % | Fuel level | 5 s |
+| Boost | `0x0B` minus `0x33` | manifold absolute pressure A kPa, minus barometric pressure A kPa | Boost | 100 ms (10 Hz) |
+| Supply voltage | ADC, divider × 11 | — | Supply voltage | Always, from the ADC, not the bus |
 
-Each channel's target period is in `Config.h` (40 ms, 25 Hz, for both to start). The channel list itself, PID, decode and frame field, is in `App.cpp` for v1; it becomes a table when vehicle profiles arrive. A value older than 1 second is left out of the frame (its valid bit clear) rather than sent stale. With two channels, each gets about half of the car's reply budget: roughly 10–30 Hz per channel on a typical car, which is the number the diagnostics will confirm.
+**Boost** is the difference of two PIDs. Manifold absolute pressure (`0x0B`) is polled at boost's period, and barometric pressure (`0x33`) as a helper every 5 s, with no frame field of its own; it shows in the D report as `Barometric`. Boost is fresh only while both are, and reads negative under vacuum. `0x0B` tops out at 255 kPa absolute, about 1.5 bar of boost at sea level.
+
+**Support.** The PID `0x00` reply covers PIDs `0x01`–`0x20`. Before polling a channel above that, the poller asks for the support bitmap that covers it (`0x20`, `0x40`, `0x60`), each only when the one before says it exists. A channel the ECU doesn't list isn't polled, and the log says so once support is known.
+
+**Fresh values.** A channel's value goes into the frame only while it's at most three of its periods old, and never less than 1 second, so a 1 Hz temperature doesn't flicker out between polls. The schema's vehicle fill mask lists the enabled channels' fields; the frame's valid bits say which the car is providing at the moment.
 
 ### Vehicle profiles
 
@@ -287,8 +305,8 @@ Otherwise it sleeps again. A full boot after a wake logs `Sleep: woke after N ch
 
 | Job | Every | Work |
 |---|---|---|
-| `can` | 10 ms | Drains TWAI RX. Waiting: checks the bit rate, makes gateway probes, runs ECU discovery. Polling: matches replies, times out the request in flight, sends the next, and notices the car going quiet. |
-| `emit` | 1 / emit rate (50 ms at 20 Hz) | Encodes a Gnimu frame from the latest values and notifies, if a client is subscribed. |
+| `can` | 5 ms | Drains TWAI RX. Waiting: checks the bit rate, makes gateway probes, runs ECU discovery. Polling: matches replies, times out the request in flight, sends the next, and notices the car going quiet. |
+| `emit` | 1 / emit rate (33 ms at 30 Hz) | Encodes a Gnimu frame from the latest values and notifies, if a client is subscribed. |
 | `power` | 100 ms | Reads the supply ADC, filters it, feeds the probe policy, logs supply and vehicle-activity changes, and decides when to [sleep](#sleep-and-the-cutoff). |
 | `ble` | 10 ms | BLE housekeeping. |
 | `led` | 25 ms | Status LED. |
@@ -300,7 +318,11 @@ Table order is priority, as in Gnimu: draining the bus comes first.
 
 ## Console and diagnostics
 
-Same port, baud and commands as Gnimu: `D` report, `C` clear counters, `V` version and config, `L` status line, a number for N status lines, `R` restart. Plus `P`, which prints the BLE protocol setup, and `W`, which keeps the device awake (no sleep) until `W` again or a restart.
+Same port, baud and commands as Gnimu: `D` report, `C` clear counters, `V` version and config, `L` status line, a number *n* for that many status lines (`0` stops them), `R` restart. Plus `P`, which prints the BLE protocol setup, `W`, which keeps the device awake (no sleep) until `W` again or a restart, and `E`, which prints the event log (`E n` for the last *n* events). Commands may be typed in lower case. The boot log ends with this list, marking `C`, `L`, `R` and `W` as USB only, since the boot log is also read over BLE, where they're refused.
+
+**The event log.** Every console log line is also kept, stamped with the uptime it was logged at: the first 2 KB of lines after each boot (the boot sequence, kept whole), then a rolling 16 KB of the most recent, oldest dropped first, with a count of what was dropped. A line repeated straight after itself is kept once with a count, so a retry loop doesn't fill the log. It lives in RAM, so a restart or a wake from deep sleep starts it afresh.
+
+**The console over BLE.** The [Console characteristic](ble-protocol.md#console) carries the report commands (`D`, `E`, `E n`, `V`, `P`, and a number for status lines) to a phone, with replies as notifications ending in `0x04`, each starting with a `> ` line that names the command it answers. Commands that change the device are refused over BLE. A command that arrives while a reply is going out is answered `busy`, naming it, once that reply has finished (`core/ConsoleReply.h`'s `ConsoleGate`). A written command is handed from the BLE host's task to the loop, which runs it through the same parser as the USB console; the reply goes out one notification per `ble` job run, behind the frames, and is dropped if the client disconnects. A status line armed from BLE shares its once-a-second timing with the USB one.
 
 **Console output never blocks.** The console is the C6's built-in USB serial port. With a cable attached but no terminal reading, its transmit buffer fills, and by default every write then waits 100 ms for room, which stalls the whole loop: polling, BLE frames, everything. The firmware sets the port's transmit timeout to 0 (`Serial.setTxTimeoutMs(0)`), so output nobody is reading is dropped instead.
 
@@ -310,7 +332,7 @@ Boot log in the same style:
 BUILD,version=0.1.0,revision=...,utc=...,target=esp32c6
 Device ID: 0301821570
 Config: hardware 12v, vehicle obd2, CAN auto 500/250 kbit/s, gateway probe at 12.40V
-Config: BLE "Gnimu-CAN 0301821570", Gnimu frame v1, 140 bytes at 20 Hz
+Config: BLE "Gnimu-CAN 0301821570", Gnimu frame v1, 140 bytes at 30 Hz
 Config: supply calibration 1.028, engine running 13.20V, cutoff 11.80V
 Gnimu-CAN starting
 Reset: power-on
@@ -322,7 +344,11 @@ BLE: advertising as "Gnimu-CAN 0301821570" ✅
 Job can: every 10000 us, budget 2000 us
 ...
 Waiting for vehicle.
-Commands end with Enter: ...
+Commands, each ended by Enter:
+  D report, E event log (E n: the last n), V version, P protocol
+  A number 0-3600: that many status lines, one a second; 0 stops
+  USB only: C clear counters, L status on/off (up to 3600 lines),
+  R restart, W stay awake on/off
 OBD: answered: 0x7E8, 0x7E9
 OBD: ECU 0x7E8 chosen, polling via 0x7E0 ✅
 OBD: PID 0C RPM supported ✅
@@ -330,7 +356,7 @@ OBD: PID 11 Throttle supported ✅
 Vehicle: engine running
 ```
 
-The `D` report adds CAN and OBD lines to Gnimu's job table: bus state and error counters, the ECU being polled and every ECU that answered discovery, and for each channel its latest value with its request, reply and timeout counts, or that the ECU supports none of the polled PIDs, then the [vehicle activity](#vehicle-activity), and a `Sleep:` line: whether the parked conditions hold and for how long, that `W` is keeping it awake, or that it's on USB alone, and how many times it has slept since power-up. After a wake, a second `Sleep:` line gives the reason, the number of checks, the voltage it went to sleep at and the range the checks read. The status line shows the state, the supply voltage, `CAN: off, no 12V` on USB alone, each channel's value and reply rate (replies per second since the previous line), the vehicle activity, and the subscribed client's packet rate.
+The `D` report keeps every line below its job table within 73 columns, for a phone, continuing longer ones on an indented second line. It adds CAN and OBD lines to Gnimu's job table: bus state and error counters, the ECU being polled and every ECU that answered discovery, and for each channel its latest value with its request, reply and timeout counts, or that the ECU supports none of the polled PIDs, then the [vehicle activity](#vehicle-activity), and a `Sleep:` line: whether the parked conditions hold and for how long, that `W` is keeping it awake, or that it's on USB alone, and how many times it has slept since power-up. After a wake, a second `Sleep:` line gives the reason, the number of checks, the voltage it went to sleep at and the range the checks read. The status line shows the state, the supply voltage, `CAN: off, no 12V` on USB alone, each channel's value and reply rate (replies per second since the previous line), the vehicle activity, and the subscribed client's packet rate.
 
 The status LED is the XIAO's single yellow LED, so it shows patterns only, like Gnimu's ESP32 build:
 
@@ -345,7 +371,7 @@ The status LED is the XIAO's single yellow LED, so it shows patterns only, like 
 
 ## Testing
 
-- **Host tests** (`tests/run.sh`) for `core/`: the scheduler, rate tracking, device ID, console input, the supply monitor, the state machine, the LED patterns, the report, status-line and JSON text, OBD request encoding and reply parsing (including the malformed and wrong-ECU cases), the probe policy and two-frame probe, the bus search (including the bench-found probe cases), discovery (including the transmission answering first), the poller (one in flight, timeouts, support bitmap, rate shares), vehicle activity, and the sleep policy and wake check. Each runs plain and under AddressSanitizer and UndefinedBehaviorSanitizer.
+- **Host tests** (`tests/run.sh`) for `core/`: the scheduler, rate tracking, device ID, console input, the supply monitor, the state machine, the LED patterns, the report, status-line and JSON text, OBD request encoding and reply parsing (including the malformed and wrong-ECU cases), the probe policy and two-frame probe, the bus search (including the bench-found probe cases), discovery (including the transmission answering first), the poller (one in flight, timeouts, support bitmaps, negative responses, silent channels, the request cap, rate shares), the decoders against example replies (and their PIDs against the frame spec), the event log (boot and rolling areas, repeats, the last n), the BLE Console reply (chunks, the end byte, resending, the echo line on every kind of reply, `busy` naming the right command, the largest replies fitting), the D report's line width, vehicle activity, and the sleep policy and wake check. Each runs plain and under AddressSanitizer and UndefinedBehaviorSanitizer.
 - **Build checks** with warnings as errors in the project's own code, as in Gnimu.
 - **On hardware**: everything on the [bench rig](#bench-rig), then the car itself: the bit-rate check or gateway probe, poll throughput, sleep and wake timings, and timing under load from the diagnostics job table ([car-test.md](car-test.md)).
 

@@ -1,0 +1,157 @@
+Monitor port settings:
+  baudrate=115200
+  bits=8
+  dtr=on
+  parity=none
+  rts=on
+  stop_bits=1
+
+Connecting to /dev/cu.usbmodem1101. Press CTRL-C to exit.
+BUILD,version=9b059fa,revision=9b059fa6aea1,utc=2026-11-26T21:16:08Z,target=esp32c6
+Device ID: 1447005429
+Config: hardware 12v, vehicle obd2, CAN auto 500/250 kbit/s, gateway probe at 12.40V
+Gnimu-CAN starting
+Reset: USB
+Watchdog: 5000 ms ✅
+L
+RT: 17s | Waiting for vehicle | Supply: 0.31V below cutoff | CAN: off, no 12V | parked | BLE: advertising
+BLE: client connected
+RT: 18s | Waiting for vehicle | Supply: 0.32V below cutoff | CAN: off, no 12V | parked | BLE: 0Hz
+RT: 19s | Waiting for vehicle | Supply: 0.32V below cutoff | CAN: off, no 12V | parked | BLE: 0Hz
+RT: 20s | Waiting for vehicle | Supply: 0.34V below cutoff | CAN: off, no 12V | parked | BLE: 18Hz
+RT: 21s | Waiting for vehicle | Supply: 0.33V below cutoff | CAN: off, no 12V | parked | BLE: 20Hz
+RT: 22s | Waiting for vehicle | Supply: 0.34V below cutoff | CAN: off, no 12V | parked | BLE: 20Hz
+RT: 23s | Waiting for vehicle | Supply: 0.34V below cutoff | CAN: off, no 12V | parked | BLE: 20Hz
+CAN: 12V supply - looking for the vehicle at 500 and 250 kbit/s
+CAN: traffic at 500 kbit/s ✅
+OBD: answered: 0x7E8
+OBD: ECU 0x7E8 chosen, polling via 0x7E0 ✅
+OBD: no replies to requests sent to 0x7E0 - asking everyone (0x7DF) instead
+OBD: PID 0C RPM supported ✅
+OBD: PID 11 Throttle supported ✅
+OBD: PID 49 Pedal supported ✅
+OBD: PID 0D Speed supported ✅
+OBD: PID 05 Coolant supported ✅
+OBD: PID 0F Intake air supported ✅
+OBD: PID 5C Oil temp supported ✅
+OBD: PID 77 CAC temp not supported - not polled ❌
+OBD: PID 46 Ambient supported ✅
+OBD: PID 2F Fuel supported ✅
+Vehicle: engine running
+RT: 24s | Polling | Supply: 13.12V below cutoff | CAN: 500 kbit/s | OBD: RPM 728 8Hz Throttle 13 7Hz Pedal 15 4Hz Speed 0 3Hz | engine running | BLE: 20Hz
+RT: 25s | Polling | Supply: 14.91V below cutoff | CAN: 500 kbit/s | OBD: RPM 711 25Hz Throttle 13 18Hz Pedal 15 9Hz Speed 0 10Hz | engine running | BLE: 20Hz
+RT: 26s | Polling | Supply: 15.09V below cutoff | CAN: 500 kbit/s | OBD: RPM 705 24Hz Throttle 13 19Hz Pedal 15 9Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 27s | Polling | Supply: 15.12V below cutoff | CAN: 500 kbit/s | OBD: RPM 721 24Hz Throttle 13 18Hz Pedal 15 10Hz Speed 0 9Hz | engine running | BLE: 20Hz
+Supply: 15.12V, engine running
+RT: 28s | Polling | Supply: 15.13V engine running | CAN: 500 kbit/s | OBD: RPM 732 25Hz Throttle 13 19Hz Pedal 15 9Hz Speed 0 10Hz | engine running | BLE: 20Hz
+RT: 29s | Polling | Supply: 15.12V engine running | CAN: 500 kbit/s | OBD: RPM 727 25Hz Throttle 13 18Hz Pedal 15 9Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 30s | Polling | Supply: 15.11V engine running | CAN: 500 kbit/s | OBD: RPM 713 24Hz Throttle 13 19Hz Pedal 15 10Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 31s | Polling | Supply: 15.11V engine running | CAN: 500 kbit/s | OBD: RPM 712 25Hz Throttle 13 19Hz Pedal 15 9Hz Speed 0 10Hz | engine running | BLE: 20Hz
+RT: 32s | Polling | Supply: 15.14V engine running | CAN: 500 kbit/s | OBD: RPM 739 25Hz Throttle 13 19Hz Pedal 15 10Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 33s | Polling | Supply: 15.12V engine running | CAN: 500 kbit/s | OBD: RPM 719 25Hz Throttle 13 19Hz Pedal 15 9Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 34s | Polling | Supply: 15.12V engine running | CAN: 500 kbit/s | OBD: RPM 726 24Hz Throttle 13 19Hz Pedal 15 9Hz Speed 0 10Hz | engine running | BLE: 20Hz
+RT: 35s | Polling | Supply: 15.12V engine running | CAN: 500 kbit/s | OBD: RPM 722 25Hz Throttle 13 18Hz Pedal 15 10Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 36s | Polling | Supply: 15.13V engine running | CAN: 500 kbit/s | OBD: RPM 727 25Hz Throttle 13 19Hz Pedal 15 9Hz Speed 0 10Hz | engine running | BLE: 20Hz
+RT: 37s | Polling | Supply: 15.13V engine running | CAN: 500 kbit/s | OBD: RPM 734 24Hz Throttle 13 19Hz Pedal 15 10Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 38s | Polling | Supply: 15.03V engine running | CAN: 500 kbit/s | OBD: RPM 698 25Hz Throttle 13 19Hz Pedal 15 9Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 39s | Polling | Supply: 15.12V engine running | CAN: 500 kbit/s | OBD: RPM 726 25Hz Throttle 13 18Hz Pedal 15 9Hz Speed 0 10Hz | engine running | BLE: 20Hz
+RT: 40s | Polling | Supply: 15.12V engine running | CAN: 500 kbit/s | OBD: RPM 740 25Hz Throttle 13 19Hz Pedal 15 10Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 41s | Polling | Supply: 15.12V engine running | CAN: 500 kbit/s | OBD: RPM 702 24Hz Throttle 13 19Hz Pedal 15 9Hz Speed 0 10Hz | engine running | BLE: 20Hz
+RT: 42s | Polling | Supply: 15.12V engine running | CAN: 500 kbit/s | OBD: RPM 699 25Hz Throttle 13 19Hz Pedal 15 10Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 43s | Polling | Supply: 15.12V engine running | CAN: 500 kbit/s | OBD: RPM 744 25Hz Throttle 13 19Hz Pedal 15 9Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 44s | Polling | Supply: 15.12V engine running | CAN: 500 kbit/s | OBD: RPM 725 25Hz Throttle 13 18Hz Pedal 15 9Hz Speed 0 10Hz | engine running | BLE: 20Hz
+RT: 45s | Polling | Supply: 15.12V engine running | CAN: 500 kbit/s | OBD: RPM 696 24Hz Throttle 13 19Hz Pedal 15 10Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 46s | Polling | Supply: 15.13V engine running | CAN: 500 kbit/s | OBD: RPM 738 25Hz Throttle 13 19Hz Pedal 15 9Hz Speed 0 10Hz | engine running | BLE: 20Hz
+RT: 47s | Polling | Supply: 15.11V engine running | CAN: 500 kbit/s | OBD: RPM 735 25Hz Throttle 13 19Hz Pedal 15 10Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 48s | Polling | Supply: 15.12V engine running | CAN: 500 kbit/s | OBD: RPM 719 25Hz Throttle 13 19Hz Pedal 15 9Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 49s | Polling | Supply: 15.13V engine running | CAN: 500 kbit/s | OBD: RPM 723 24Hz Throttle 13 18Hz Pedal 15 9Hz Speed 0 10Hz | engine running | BLE: 20Hz
+RT: 50s | Polling | Supply: 15.13V engine running | CAN: 500 kbit/s | OBD: RPM 729 25Hz Throttle 13 19Hz Pedal 15 10Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 51s | Polling | Supply: 15.13V engine running | CAN: 500 kbit/s | OBD: RPM 724 24Hz Throttle 13 19Hz Pedal 15 9Hz Speed 0 10Hz | engine running | BLE: 20Hz
+RT: 52s | Polling | Supply: 15.12V engine running | CAN: 500 kbit/s | OBD: RPM 719 25Hz Throttle 13 19Hz Pedal 15 10Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 53s | Polling | Supply: 15.12V engine running | CAN: 500 kbit/s | OBD: RPM 713 25Hz Throttle 13 19Hz Pedal 15 9Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 54s | Polling | Supply: 15.13V engine running | CAN: 500 kbit/s | OBD: RPM 720 24Hz Throttle 13 19Hz Pedal 15 9Hz Speed 0 10Hz | engine running | BLE: 20Hz
+RT: 55s | Polling | Supply: 15.12V engine running | CAN: 500 kbit/s | OBD: RPM 713 25Hz Throttle 13 18Hz Pedal 15 10Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 56s | Polling | Supply: 15.14V engine running | CAN: 500 kbit/s | OBD: RPM 722 25Hz Throttle 13 19Hz Pedal 15 9Hz Speed 0 10Hz | engine running | BLE: 20Hz
+RT: 57s | Polling | Supply: 15.13V engine running | CAN: 500 kbit/s | OBD: RPM 732 24Hz Throttle 13 19Hz Pedal 15 9Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 58s | Polling | Supply: 15.05V engine running | CAN: 500 kbit/s | OBD: RPM 709 25Hz Throttle 13 18Hz Pedal 15 10Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 59s | Polling | Supply: 15.11V engine running | CAN: 500 kbit/s | OBD: RPM 721 25Hz Throttle 13 19Hz Pedal 15 9Hz Speed 0 10Hz | engine running | BLE: 20Hz
+RT: 60s | Polling | Supply: 15.12V engine running | CAN: 500 kbit/s | OBD: RPM 737 25Hz Throttle 13 19Hz Pedal 15 10Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 61s | Polling | Supply: 15.10V engine running | CAN: 500 kbit/s | OBD: RPM 728 24Hz Throttle 13 19Hz Pedal 15 9Hz Speed 0 10Hz | engine running | BLE: 20Hz
+RT: 62s | Polling | Supply: 15.11V engine running | CAN: 500 kbit/s | OBD: RPM 733 25Hz Throttle 13 19Hz Pedal 15 9Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 63s | Polling | Supply: 15.12V engine running | CAN: 500 kbit/s | OBD: RPM 720 25Hz Throttle 13 18Hz Pedal 15 10Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 64s | Polling | Supply: 15.13V engine running | CAN: 500 kbit/s | OBD: RPM 732 25Hz Throttle 13 19Hz Pedal 15 9Hz Speed 0 10Hz | engine running | BLE: 20Hz
+RT: 65s | Polling | Supply: 15.14V engine running | CAN: 500 kbit/s | OBD: RPM 722 24Hz Throttle 13 19Hz Pedal 15 10Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 66s | Polling | Supply: 15.09V engine running | CAN: 500 kbit/s | OBD: RPM 719 25Hz Throttle 13 19Hz Pedal 15 9Hz Speed 0 9Hz | engine running | BLE: 20Hz
+RT: 67s | Polling | Supply: 15.12V engine running | CAN: 500 kbit/s | OBD: RPM 704 25Hz Throttle 13 18Hz Pedal 15 9Hz Speed 0 10Hz | engine running | BLE: 20Hz
+RT: 68s | Polling | Supply: 15.13V engine running | CAN: 500 kbit/s | OBD: RPM 739 24Hz Throttle 13 19Hz Pedal 15 10Hz Speed 0 9Hz | engine running | BLE: 20Hz
+LRT: 69s | Polling | Supply: 15.13V engine running | CAN: 500 kbit/s | OBD: RPM 728 25Hz Throttle 13 19Hz Pedal 15 9Hz Speed 0 10Hz | engine running | BLE: 20Hz
+
+D
+========================================================================
+| job     | runs | skipped | overruns | max μs | mean μs | max late μs |
+------------------------------------------------------------------------
+| can     | 7133 |       0 |        0 |    606 |      40 |        5531 |
+| emit    | 1427 |       0 |        0 |    720 |     448 |        5571 |
+| power   |  714 |       0 |        0 |    702 |     143 |        6178 |
+| ble     | 7133 |       0 |        0 |     83 |       3 |        6370 |
+| led     | 2853 |       0 |        0 |     80 |      12 |        6377 |
+| console | 7132 |       0 |        0 |    337 |       9 |        6393 |
+========================================================================
+| RT:                          71s | Loops:                      18128 |
+========================================================================
+Reset: USB
+State: Polling
+Supply: 15.11V, engine running
+CAN: active at 500 kbit/s, TEC 0, REC 0, bus errors 0, missed 13
+CAN: traffic at 500 kbit/s, 3768 frames
+CAN: gateway probes 0, last: none
+OBD: ECU 0x7E8, requests to 0x7DF, everyone (answered: 0x7E8)
+OBD: PID 0C RPM: 711.0 rpm, every 40 ms, requests 1183, replies 1183, timeouts 0, reply avg 10 ms, max 16 ms
+OBD: PID 11 Throttle: 12.9 %, every 50 ms, requests 900, replies 900, timeouts 0, reply avg 10 ms, max 17 ms
+OBD: PID 49 Pedal: 14.5 %, every 100 ms, requests 451, replies 451, timeouts 0, reply avg 10 ms, max 16 ms
+OBD: PID 0D Speed: 0.0 km/h, every 100 ms, requests 450, replies 450, timeouts 0, reply avg 10 ms, max 15 ms
+OBD: PID 05 Coolant: 81.0 °C, every 1000 ms, requests 48, replies 48, timeouts 0, reply avg 10 ms, max 10 ms
+OBD: PID 0F Intake air: 18.0 °C, every 1000 ms, requests 48, replies 48, timeouts 0, reply avg 10 ms, max 15 ms
+OBD: PID 5C Oil temp: 66.0 °C, every 1000 ms, requests 48, replies 48, timeouts 0, reply avg 10 ms, max 14 ms
+OBD: PID 77 CAC temp: not supported
+OBD: PID 46 Ambient: 12.0 °C, every 5000 ms, requests 10, replies 10, timeouts 0, reply avg 10 ms, max 10 ms
+OBD: PID 2F Fuel: 99.6 %, every 5000 ms, requests 10, replies 10, timeouts 0, reply avg 10 ms, max 10 ms
+Vehicle: engine running
+Sleep: not parked, slept 0 times since power-up
+BLE: connected, MTU 247, sent 1050, failed 0, refused 9, max send 666μs
+Console: dropped 797 bytes
+D
+========================================================================
+| job     | runs | skipped | overruns | max μs | mean μs | max late μs |
+------------------------------------------------------------------------
+| can     | 7330 |       0 |        0 |    606 |      40 |        5531 |
+| emit    | 1466 |       0 |        0 |    720 |     452 |        5571 |
+| power   |  733 |       0 |        0 |    702 |     144 |        6178 |
+| ble     | 7330 |       0 |        0 |     83 |       3 |        6370 |
+| led     | 2932 |       0 |        0 |     80 |      12 |        6377 |
+| console | 7329 |       0 |        1 |   3904 |      10 |        6393 |
+========================================================================
+| RT:                          73s | Loops:                      18641 |
+========================================================================
+Reset: USB
+State: Polling
+Supply: 15.11V, engine running
+CAN: active at 500 kbit/s, TEC 0, REC 0, bus errors 0, missed 13
+CAN: traffic at 500 kbit/s, 3916 frames
+CAN: gateway probes 0, last: none
+OBD: ECU 0x7E8, requests to 0x7DF, everyone (answered: 0x7E8)
+OBD: PID 0C RPM: 739.0 rpm, every 40 ms, requests 1232, replies 1232, timeouts 0, reply avg 10 ms, max 16 ms
+OBD: PID 11 Throttle: 12.9 %, every 50 ms, requests 937, replies 937, timeouts 0, reply avg 10 ms, max 17 ms
+OBD: PID 49 Pedal: 14.5 %, every 100 ms, requests 469, replies 469, timeouts 0, reply avg 10 ms, max 16 ms
+OBD: PID 0D Speed: 0.0 km/h, every 100 ms, requests 469, replies 469, timeouts 0, reply avg 10 ms, max 15 ms
+OBD: PID 05 Coolant: 81.0 °C, every 1000 ms, requests 50, replies 50, timeouts 0, reply avg 10 ms, max 10 ms
+OBD: PID 0F Intake air: 18.0 °C, every 1000 ms, requests 50, replies 50, timeouts 0, reply avg 10 ms, max 15 ms
+OBD: PID 5C Oil temp: 66.0 °C, every 1000 ms, requests 50, replies 50, timeouts 0, reply avg 10 ms, max 14 ms
+OBD: PID 77 CAC temp: not supported
+OBD: PID 46 Ambient: 12.0 °C, every 5000 ms, requests 10, replies 10, timeouts 0, reply avg 10 ms, max 10 ms
+OBD: PID 2F Fuel: 99.6 %, every 5000 ms, requests 10, replies 10, timeouts 0, reply avg 10 ms, max 10 ms
+Vehicle: engine running
+Sleep: not parked, slept 0 times since power-up
+BLE: connected, MTU 247, sent 1089, failed 0, refused 9, max send 666μs
+Console: dropped 797 bytes
+^C

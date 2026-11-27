@@ -13,9 +13,9 @@
 using namespace gnimu;
 
 using Entry = ConsoleEntry<3600>;
-static_assert(Entry::kCapacity == 4, "3600 has four digits");
-static_assert(ConsoleEntry<300>::kCapacity == 3, "capacity follows the cap");
-static_assert(ConsoleEntry<99999>::kCapacity == 5, "capacity follows the cap");
+static_assert(Entry::kCapacity == 6, "\"E \" and 3600's four digits");
+static_assert(ConsoleEntry<300>::kCapacity == 5, "capacity follows the cap");
+static_assert(ConsoleEntry<99999>::kCapacity == 7, "capacity follows the cap");
 
 // Feeds every byte; returns the last non-None result (None if there was none).
 static EntryResult feedAll(Entry& e, const char* s) {
@@ -39,7 +39,10 @@ static void testCommands() {
                         {"P\n", CommandKind::Protocol},
                         {"L\n", CommandKind::ToggleStatus},
                         {"R\r", CommandKind::Restart},
-                        {"W\n", CommandKind::ToggleStayAwake}};
+                        {"W\n", CommandKind::ToggleStayAwake},
+                        {"E\n", CommandKind::Events},
+                        {"d\n", CommandKind::Report},  // lower case too
+                        {"e\r\n", CommandKind::Events}};
   for (const Case& c : cases) {
     const EntryResult r = feedAll(e, c.text);
     assert(r.kind == EntryKind::Command && r.cmd == c.kind);
@@ -65,17 +68,17 @@ static void testTooLarge() {
 
 static void testUnrecognisedIsRejectedWhole() {
   Entry e;
-  for (const char* s : {"Love\n", "DVL\n", "1g6\n", "1g6t\n", "d\n", " D\n"}) {
+  for (const char* s : {"Love\n", "DVL\n", "1g6\n", "1g6t\n", "x\n", " D\n", "D 5\n", "E x\n", "E 1x\n"}) {
     assert(feedAll(e, s).kind == EntryKind::Unrecognised);
   }
   feedAll(e, "1g6\n");
-  assert(strcmp(e.text(), "1g6") == 0 && !e.truncated());
+  assert(strcmp(e.text(), "1G6") == 0 && !e.truncated());  // letters shown in upper case
 }
 
 static void testLongEntryEchoesWhatFit() {
   Entry e;
-  assert(feedAll(e, "Lovely\n").kind == EntryKind::Unrecognised);
-  assert(strcmp(e.text(), "Love") == 0 && e.truncated());
+  assert(feedAll(e, "Lovelier\n").kind == EntryKind::Unrecognised);
+  assert(strcmp(e.text(), "LOVELI") == 0 && e.truncated());
 }
 
 static void testNonPrintableShownAsQuestionMark() {
@@ -102,8 +105,32 @@ static void testResetAbandonsEntry() {
   assert(r.kind == EntryKind::Count && r.count == 3);
 }
 
+// E with a count: the last n events.
+static void testEventsWithCount() {
+  Entry e;
+  EntryResult r = feedAll(e, "E 20\n");
+  assert(r.kind == EntryKind::Command && r.cmd == CommandKind::Events && r.hasArg && r.arg == 20);
+  r = feedAll(e, "e 3600\n");
+  assert(r.kind == EntryKind::Command && r.hasArg && r.arg == 3600);
+  r = feedAll(e, "E\n");
+  assert(r.kind == EntryKind::Command && !r.hasArg);
+  assert(feedAll(e, "E 0\n").kind == EntryKind::TooLarge);
+  assert(feedAll(e, "E 3601\n").kind == EntryKind::TooLarge);
+}
+
+// Only commands that report may come from an unbonded BLE client.
+static void testReportOnly() {
+  assert(reportOnly(CommandKind::Report) && reportOnly(CommandKind::Version));
+  assert(reportOnly(CommandKind::Protocol) && reportOnly(CommandKind::Events));
+  assert(!reportOnly(CommandKind::Clear) && !reportOnly(CommandKind::Restart));
+  assert(!reportOnly(CommandKind::ToggleStayAwake) && !reportOnly(CommandKind::ToggleStatus));
+  assert(!reportOnly(CommandKind::None));
+}
+
 int main() {
   testCommands();
+  testEventsWithCount();
+  testReportOnly();
   testCounts();
   testTooLarge();
   testUnrecognisedIsRejectedWhole();

@@ -3,7 +3,8 @@
 # Copyright (C) 2026 Chris Halstead
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# Builds and runs every host test: tests/test_*.cpp against GnimuCAN/src/core.
+# Builds and runs every host test: tests/test_*.cpp against GnimuCAN/src/core,
+# then checks the Mode 01 decoders' PIDs against the frame spec.
 # Each test runs twice: a plain build (closest to the firmware's codegen) and
 # one under AddressSanitizer + UndefinedBehaviorSanitizer, where the first
 # finding fails the run. gnu++11 matches the oldest standard the Gnimu family
@@ -21,4 +22,5 @@ for t in test_*.cpp; do
   g++ "${flags[@]}" "${sanitize[@]}" "$t" -o "$out/$name-san"
   "$out/$name-san" > /dev/null
 done
+python3 check_obd_spec.py
 echo "all suites passed (plain and sanitized)"

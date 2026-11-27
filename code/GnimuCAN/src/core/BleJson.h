@@ -47,15 +47,19 @@ struct CfgItem {
 };
 
 // The Device info characteristic: the build and the current settings.
+// `console`: the Console commands accepted over BLE, as a JSON array
+// (Gnimu protocol, Device info); nullptr leaves the key out.
 inline size_t formatDeviceInfoJson(char* buf, size_t cap, const BuildInfo& b, const CfgItem* cfg,
-                                   size_t cfgCount) {
+                                   size_t cfgCount, const char* console = nullptr) {
   detail::Out o{buf, cap, 0};
   if (cap) buf[0] = '\0';
   o.put("{\"v\":1,\"build\":{\"rev\":\"%s\",\"utc\":\"%s\",\"target\":\"%s\"},\"cfg\":{", b.revision,
         b.buildUtc, b.target);
   for (size_t i = 0; i < cfgCount; i++)
     o.put(cfg[i].quoted ? "%s\"%s\":\"%s\"" : "%s\"%s\":%s", i ? "," : "", cfg[i].key, cfg[i].value);
-  o.put("}}");
+  o.put("}");
+  if (console) o.put(",\"console\":%s", console);
+  o.put("}");
   return o.len;
 }
 

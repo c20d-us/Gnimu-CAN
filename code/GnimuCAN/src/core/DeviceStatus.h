@@ -8,6 +8,8 @@
 
 #include "BleStats.h"
 #include "CanFrame.h"
+#include "Obd2Pids.h"
+#include "ObdPoller.h"
 #include "ProbePolicy.h"
 #include "ResetReason.h"
 #include "RunStateMachine.h"
@@ -30,16 +32,23 @@ struct ObdChannelView {
   const char* name;
   const char* unit;
   uint8_t pid;
-  bool supported;
+  ChannelState state;
+  uint32_t periodMs;
   uint32_t requests;
   uint32_t replies;
   uint32_t timeouts;
+  uint32_t replyAvgMs;  // request to reply, in can-job steps
+  uint32_t replyMaxMs;
   bool fresh;      // answered within the stale window
   uint32_t ageMs;  // since the last reply, when there's been one
   float value;     // decoded, when there's been a reply
+
+  bool polled() const { return state == ChannelState::Polling || state == ChannelState::Silent; }
 };
 
-constexpr size_t kMaxObdChannels = 4;
+// Room for every Mode 01 channel the decoders know, and their helpers
+// (core/Obd2Pids.h).
+constexpr size_t kMaxObdChannels = obd2::kPidDecoderCount + obd2::kHelperDecoderCount;
 
 // What OBD polling has found, kept by App.
 struct ObdSummary {

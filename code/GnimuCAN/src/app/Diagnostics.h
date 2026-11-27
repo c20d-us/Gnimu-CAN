@@ -46,8 +46,15 @@ class Diagnostics {
   // One poll's result: Report, Version, ToggleStatus and a count act here;
   // Clear re-baselines the status line's rate tracker.
   void handle(const ConsoleCommand& cmd);
-  // Prints the status line when one is due.
-  void tick(uint64_t nowUs);
+  // When a status line is due: prints it if the console asked for it, and
+  // copies it to `bleLine` if a BLE client did, returning that length (0 for
+  // none).
+  size_t tick(uint64_t nowUs, char* bleLine, size_t bleCap);
+  // A BLE client's count: that many status lines, once a second.
+  void armBleStatus(uint32_t count);
+  // A report-only command's reply text for a BLE client (D, V, P, E).
+  // Truncated, never overrun; returns the length.
+  size_t formatBleReply(const ConsoleCommand& cmd, char* buf, size_t cap);
 
   // What this device is: the build, the device ID and the settings it was
   // built with. The V command, and the top of the boot log.
@@ -68,7 +75,8 @@ class Diagnostics {
   size_t formatProtocol(char* buf, size_t cap) const;
   DeviceStatus snapshot(uint64_t nowUs) const;
   void printReport();
-  void printStatus(uint64_t nowUs);
+  size_t formatStatusLine(uint64_t nowUs, char* buf, size_t cap);
+  void startStatusGrid();
 
   Console& console_;
   const Job* jobs_;
@@ -89,6 +97,7 @@ class Diagnostics {
   // Status lines still to print: 0 = off. Both L and a typed count arm it,
   // never beyond kStatusMaxCount.
   uint32_t statusRemaining_ = 0;
+  uint32_t bleStatusRemaining_ = 0;  // the same, for a BLE client
   uint64_t nextStatusDueUs_ = 0;
 };
 

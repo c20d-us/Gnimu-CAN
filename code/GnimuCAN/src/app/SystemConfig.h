@@ -13,6 +13,8 @@
 #include <stdint.h>
 
 #include "../../Config.h"
+#include "../core/DeviceStatus.h"
+#include "../core/Obd2Pids.h"
 
 namespace gnimu {
 namespace config {
@@ -23,7 +25,7 @@ namespace config {
 // CAN: drains the controller's receive queue, checks the bit rate, makes
 // gateway probes and asks for an ECU. Nothing waits inside it: a request is
 // sent, and later runs take the reply or time it out.
-constexpr uint32_t kCanPeriodUs = 10000;
+constexpr uint32_t kCanPeriodUs = 5000;
 constexpr uint32_t kCanBudgetUs = 2000;
 // The frame: one Gnimu frame per period while a client is subscribed.
 constexpr uint32_t kEmitPeriodUs = 1000000 / kEmitRateHz;
@@ -83,8 +85,23 @@ constexpr uint32_t kObdReplyTimeoutMs = 50;
 // No reply to any channel for this long: the car has gone quiet (switched
 // off, most likely), and the device goes back to waiting for it.
 constexpr uint32_t kVehicleLostMs = 2000;
-// A channel's value goes into the frame only while it's at most this old.
+// A channel's value goes into the frame only while it's at most this old:
+// kStalePeriods of its poll period, and never less than kChannelStaleMs.
 constexpr uint32_t kChannelStaleMs = 1000;
+constexpr uint32_t kStalePeriods = 3;
+// How often a helper PID is polled: one read only to be subtracted from
+// another, such as barometric pressure for boost.
+constexpr uint32_t kHelperPeriodMs = 5000;
+// A channel that times out this many times in a row is not answering: it's
+// asked only every kSilentRetryMs until it answers again, so it doesn't take
+// the other channels' share of the ECU's replies.
+constexpr uint8_t kSilentAfterTimeouts = 3;
+constexpr uint32_t kSilentRetryMs = 5000;
+// After this many timeouts in a row with no reply at all, polling stops
+// sending to the ECU's physical address and asks everyone (0x7DF): some
+// gateways pass only functional requests from the OBD port. Remembered for
+// the rest of the boot.
+constexpr uint8_t kAskEveryoneAfterTimeouts = 3;
 // With traffic on the bus but no ECU answering, how long before asking again:
 // every 5 s for 3 tries, every 30 s for the next 3, then every 2 minutes
 // (core/DiscoveryBackoff.h). Starts over when the bus goes quiet.
@@ -92,6 +109,18 @@ constexpr uint32_t kDiscoveryRetryMs = 5000;
 constexpr uint32_t kDiscoveryBackoffMs = 30000;
 constexpr uint32_t kDiscoveryMaxBackoffMs = 120000;
 constexpr uint8_t kDiscoveryTriesPerStep = 3;
+
+// The console's event log (the E command, over USB or BLE): the first
+// kBootLogBytes of lines after each boot, kept whole, then a rolling
+// kEventLogBytes of the most recent.
+constexpr size_t kBootLogBytes = 2048;
+constexpr size_t kEventLogBytes = 16384;
+// A Console reply on its way to a BLE client: room for the largest, the event
+// log, with its headers.
+constexpr size_t kBleReplyBytes = kBootLogBytes + kEventLogBytes + 512;
+// BLE Console commands come no closer together than this; one sooner is
+// answered "busy".
+constexpr uint32_t kBleCommandGapMs = 500;
 
 // Sleep
 
@@ -128,6 +157,24 @@ constexpr uint32_t kLedFlashPeriodMs = 2000;  // ... every 2 s
 
 // Checks: the settings in Config.h first, then the system constants.
 
+// kObdPolls (Config.h), checked when the firmware compiles.
+constexpr size_t kObdPollCount = sizeof(kObdPolls) / sizeof(kObdPolls[0]);
+// The poller's channels: kObdPolls, then one slot per helper PID.
+constexpr size_t kObdChannelCount = kObdPollCount + obd2::kHelperDecoderCount;
+constexpr bool pollsHaveDecoders(size_t i = 0) {
+  return i >= kObdPollCount || (obd2::hasDecoder(kObdPolls[i].field) && pollsHaveDecoders(i + 1));
+}
+constexpr bool pollPeriodsValid(size_t i = 0) {
+  return i >= kObdPollCount ||
+         ((kObdPolls[i].periodMs == 0 || kObdPolls[i].periodMs >= 10) && pollPeriodsValid(i + 1));
+}
+constexpr bool fieldOnceAfter(size_t i, size_t j) {
+  return j >= kObdPollCount || (kObdPolls[i].field != kObdPolls[j].field && fieldOnceAfter(i, j + 1));
+}
+constexpr bool pollFieldsUnique(size_t i = 0) {
+  return i >= kObdPollCount || (fieldOnceAfter(i, i + 1) && pollFieldsUnique(i + 1));
+}
+
 static_assert(kEmitRateHz >= 1 && kEmitRateHz <= 50, "emit rate must be 1-50 Hz");
 static_assert(sizeof(kBleNamePrefix) >= 2 && sizeof(kBleNamePrefix) <= 20,
               "BLE name prefix must be 1-19 characters so the advertised name fits");
@@ -143,9 +190,17 @@ static_assert(kGatewayProbeBitrate == 500000 || kGatewayProbeBitrate == 250000,
               "the gateway probe runs at 500 or 250 kbit/s");
 static_assert(kProbeReplyMs > kProbeTxConfirmMs && kProbeReplyMs < kProbeIntervalMs,
               "a probe waits longer for a reply than for the frame to go, and ends before the next is due");
-static_assert(kRpmPeriodMs >= 10 && kThrottlePeriodMs >= 10, "poll periods must be at least 10 ms");
-static_assert(kChannelStaleMs > kRpmPeriodMs && kChannelStaleMs > kThrottlePeriodMs,
-              "a channel must stay fresh for longer than its poll period");
+static_assert(pollsHaveDecoders(), "every channel in kObdPolls needs a decoder in core/Obd2Pids.h");
+static_assert(pollPeriodsValid(), "kObdPolls periods must be 0 (off) or at least 10 ms");
+static_assert(pollFieldsUnique(), "a field appears more than once in kObdPolls");
+static_assert(kObdChannelCount <= kMaxObdChannels,
+              "more channels in kObdPolls than the reports hold");
+static_assert(kMaxObdRequestsPerSec >= 10 && kMaxObdRequestsPerSec <= 500,
+              "the OBD request cap must be 10-500 a second");
+static_assert(kStalePeriods >= 2, "a value must stay fresh for at least two poll periods");
+static_assert(kSilentAfterTimeouts >= 1 && kSilentRetryMs >= 1000, "silent channels: at least 1 timeout, retry >= 1 s");
+static_assert(kAskEveryoneAfterTimeouts >= 1 && kAskEveryoneAfterTimeouts * kObdReplyTimeoutMs * 2 < kVehicleLostMs,
+              "asking everyone must start well before the vehicle counts as lost");
 static_assert(kDiscoveryRetryMs <= kDiscoveryBackoffMs && kDiscoveryBackoffMs <= kDiscoveryMaxBackoffMs,
               "discovery backoff must not get shorter");
 static_assert(kDiscoveryTriesPerStep >= 1, "at least one discovery try per backoff step");

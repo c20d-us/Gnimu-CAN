@@ -78,5 +78,22 @@ inline bool parseMode01Reply(const CanFrame& f, uint8_t pid, Mode01Reply& out) {
   return true;
 }
 
+// Negative responses: 7F, the requested mode, then a response code.
+constexpr uint8_t kNegativeResponse = 0x7F;
+constexpr uint8_t kResponsePending = 0x78;  // still working on it: wait again
+constexpr uint8_t kBusyRepeatRequest = 0x21;
+
+// Codes that mean the ECU doesn't support what was asked.
+inline bool isNotSupported(uint8_t nrc) { return nrc == 0x11 || nrc == 0x12 || nrc == 0x31; }
+
+// True, filling `nrc`, when `f` is a single-frame negative response to a Mode
+// 01 request from an ECU in 0x7E8-0x7EF.
+inline bool parseNegativeReply(const CanFrame& f, uint8_t& nrc) {
+  if (f.extended || f.id < kFirstResponseId || f.id > kLastResponseId || f.len < 4) return false;
+  if (f.data[0] != 0x03 || f.data[1] != kNegativeResponse || f.data[2] != kModeCurrentData) return false;
+  nrc = f.data[3];
+  return true;
+}
+
 }  // namespace obd2
 }  // namespace gnimu

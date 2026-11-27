@@ -24,7 +24,10 @@ struct StatusRates {
 
 // The longest status line, newline included, plus its terminator.
 // test_text checks the worst case fits.
-constexpr size_t kStatusLineMaxBytes = 256;
+constexpr size_t kStatusLineMaxBytes = 320;
+// The status line shows the first this-many polled channels; the D report
+// shows them all.
+constexpr size_t kStatusLineChannels = 4;
 
 inline size_t formatStatus(char *buf, size_t cap, const DeviceStatus &d, const StatusRates &r) {
   detail::Out o{buf, cap, 0};
@@ -47,9 +50,11 @@ inline size_t formatStatus(char *buf, size_t cap, const DeviceStatus &d, const S
   }
   if (d.obd.ecuFound) {
     o.put("OBD:");
+    size_t shown = 0;
     for (size_t i = 0; i < d.obd.channelCount && i < kMaxObdChannels; i++) {
       const ObdChannelView &c = d.obd.channels[i];
-      if (!c.supported) continue;
+      if (!c.polled()) continue;
+      if (shown++ == kStatusLineChannels) break;
       o.put(" %s ", c.name);
       if (c.fresh) {
         o.put("%ld", static_cast<long>(c.value + 0.5f));

@@ -11,15 +11,17 @@
 
 #include <stdint.h>
 
+#include "src/protocol/layout_v1.h"
+
 namespace gnimu {
 namespace config {
 
 // BLE
 
-// Gnimu frames sent per second while a client is subscribed. 20 to start; the
-// target is 30-50, above the GNSS rate of the app's own position source
+// Gnimu frames sent per second while a client is subscribed. The target is
+// 30-50, above the GNSS rate of the app's own position source
 // (docs/architecture.md, Emit rate).
-constexpr uint32_t kEmitRateHz = 20;
+constexpr uint32_t kEmitRateHz = 30;
 // Advertised name is "<prefix> <10-digit device ID>"; the prefix is also the
 // Device Information model string and the schema's product name.
 constexpr char kBleNamePrefix[] = "Gnimu-CAN";
@@ -80,11 +82,37 @@ constexpr float kWakeCheckOffsetV = 0.10f;
 
 // OBD-II polling
 
-// How often each channel is asked for. The car's reply rate is shared between
-// the channels, so these are targets: the D report and status line show the
-// rate each one actually gets.
-constexpr uint32_t kRpmPeriodMs = 40;       // 25 Hz
-constexpr uint32_t kThrottlePeriodMs = 40;  // 25 Hz
+// The Mode 01 channels: which to poll and how often. A period of 0 turns a
+// channel off. Periods are targets: the car's reply rate is shared between
+// the channels, and the D report and status line show the rate each one
+// actually gets. Order matters: ECU discovery prefers the ECU supporting the
+// first channels, and the status line shows the first four polled. How each
+// PID decodes is fixed by the standard (src/core/Obd2Pids.h).
+struct ObdPoll {
+  gnimu_frame::v1::Field field;
+  uint32_t periodMs;
+};
+using F = gnimu_frame::v1::Field;
+constexpr ObdPoll kObdPolls[] = {
+    {F::EngineSpeed, 40},            // PID 0C, 25 Hz
+    {F::ThrottlePosition, 50},       // PID 11, 20 Hz
+    {F::AcceleratorPedal, 100},      // PID 49, 10 Hz
+    {F::VehicleSpeed, 100},          // PID 0D, 10 Hz
+    {F::Boost, 100},                 // PID 0B minus 33 (read every 5 s), 10 Hz
+    {F::CoolantTemp, 1000},          // PID 05, 1 Hz
+    {F::IntakeAirTemp, 1000},        // PID 0F, 1 Hz
+    {F::OilTemp, 1000},              // PID 5C, 1 Hz
+    {F::ChargeAirCoolerTemp, 1000},  // PID 77, 1 Hz
+    {F::AmbientTemp, 5000},          // PID 46, every 5 s
+    {F::FuelLevel, 5000},            // PID 2F, every 5 s
+};
+// About 79 requests a second in all. The M2 answered 69 a second with
+// replies in under 10 ms (docs/car-test.md), and kMaxObdRequestsPerSec caps
+// the total. A car that can't keep up gives each channel a share in
+// proportion to its period.
+// At most this many requests a second across all channels, whatever the
+// periods add up to, so the car's diagnostic bus never sees more.
+constexpr uint32_t kMaxObdRequestsPerSec = 100;
 // At or above this, with fresh RPM, the engine is running whatever the supply
 // voltage says.
 constexpr float kEngineRunningMinRpm = 400.0f;

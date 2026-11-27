@@ -32,14 +32,30 @@ uint64_t firstStatusGridUs(uint64_t nowUs) {
   return nextStatusGridUs(nowUs + config::kStatusPeriodUs - 1);
 }
 
-// The fields Gnimu-CAN v1 fills, for the schema's fill masks.
-constexpr frame::Field kVehicleFields[] = {frame::Field::EngineSpeed, frame::Field::ThrottlePosition};
-constexpr frame::Field kPowerFields[] = {frame::Field::SupplyVoltage};
-
-uint32_t fillMask(const frame::Field* fields, size_t n) {
+// The fields Gnimu-CAN fills, for the schema's fill masks: the vehicle
+// fields of the channels polled (Config.h's kObdPolls), and the supply.
+uint32_t vehicleFillMask() {
   uint32_t m = 0;
-  for (size_t i = 0; i < n; i++) m |= 1u << frame::info(fields[i]).bit;
+  for (size_t i = 0; i < config::kObdPollCount; i++)
+    if (config::kObdPolls[i].periodMs > 0) m |= 1u << frame::info(config::kObdPolls[i].field).bit;
   return m;
+}
+uint32_t powerFillMask() { return 1u << frame::info(frame::Field::SupplyVoltage).bit; }
+
+const char* typeName(frame::Type t) {
+  switch (t) {
+    case frame::Type::U8:
+      return "uint8";
+    case frame::Type::I16:
+      return "int16";
+    case frame::Type::U16:
+      return "uint16";
+    case frame::Type::I32:
+      return "int32";
+    case frame::Type::F64:
+      return "double";
+  }
+  return "?";
 }
 
 // Hundredths, rounded: the console prints integers only.
@@ -56,7 +72,7 @@ void Diagnostics::handle(const ConsoleCommand& cmd) {
     case CommandKind::Clear:
       // The counters were just cleared, so the old baseline would read as a
       // backwards jump; measure the next line from now instead.
-      if (statusRemaining_ != 0) {
+      if (statusRemaining_ != 0 || bleStatusRemaining_ != 0) {
         const uint64_t now = PlatformClock::nowUs();
         frameRate_.reset(ble_.stats().sent, now);
         for (size_t i = 0; i < obd_.channelCount; i++) channelRate_[i].reset(obd_.channels[i].replies, now);
@@ -68,6 +84,9 @@ void Diagnostics::handle(const ConsoleCommand& cmd) {
     case CommandKind::Protocol:
       printProtocol();
       break;
+    case CommandKind::Events:
+      console_.printEvents(cmd.hasArg ? cmd.arg : 0);
+      break;
     case CommandKind::Restart:
     case CommandKind::ToggleStayAwake:
       break;  // App acts on these
@@ -78,22 +97,65 @@ void Diagnostics::handle(const ConsoleCommand& cmd) {
   if (cmd.hasCount) armStatus(cmd.count);
 }
 
-void Diagnostics::tick(uint64_t nowUs) {
-  if (statusRemaining_ == 0 || nowUs < nextStatusDueUs_) return;
-  printStatus(nowUs);
+size_t Diagnostics::tick(uint64_t nowUs, char* bleLine, size_t bleCap) {
+  if ((statusRemaining_ == 0 && bleStatusRemaining_ == 0) || nowUs < nextStatusDueUs_) return 0;
+  // One line for both outputs, so the rates are measured once per second.
+  char line[kStatusLineMaxBytes];
+  const size_t n = formatStatusLine(nowUs, line, sizeof(line));
+  size_t bleLen = 0;
+  if (statusRemaining_ > 0) {
+    console_.print(line, n);
+    statusRemaining_--;
+  }
+  if (bleStatusRemaining_ > 0) {
+    bleLen = n < bleCap ? n : bleCap;
+    memcpy(bleLine, line, bleLen);
+    bleStatusRemaining_--;
+  }
   nextStatusDueUs_ += config::kStatusPeriodUs;
   if (nextStatusDueUs_ <= nowUs) nextStatusDueUs_ = nextStatusGridUs(nowUs);
-  statusRemaining_--;
+  return bleLen;
+}
+
+void Diagnostics::armBleStatus(uint32_t count) {
+  const bool wasOff = statusRemaining_ == 0 && bleStatusRemaining_ == 0;
+  bleStatusRemaining_ = count;
+  if (count != 0 && wasOff) startStatusGrid();
+}
+
+size_t Diagnostics::formatBleReply(const ConsoleCommand& cmd, char* buf, size_t cap) {
+  switch (cmd.kind) {
+    case CommandKind::Report: {
+      const JobTable jobs = {jobs_, stats_, jobCount_, loops_};
+      return formatReport(buf, cap, jobs, snapshot(PlatformClock::nowUs()));
+    }
+    case CommandKind::Version:
+      return formatVersion(buf, cap);
+    case CommandKind::Protocol:
+      return formatProtocol(buf, cap);
+    case CommandKind::Events:
+      return console_.formatEvents(buf, cap, cmd.hasArg ? cmd.arg : 0);
+    case CommandKind::None:
+    case CommandKind::Clear:
+    case CommandKind::ToggleStatus:
+    case CommandKind::Restart:
+    case CommandKind::ToggleStayAwake:
+      break;
+  }
+  return 0;
+}
+
+void Diagnostics::startStatusGrid() {
+  const uint64_t now = PlatformClock::nowUs();
+  frameRate_.reset(ble_.stats().sent, now);
+  for (size_t i = 0; i < obd_.channelCount; i++) channelRate_[i].reset(obd_.channels[i].replies, now);
+  nextStatusDueUs_ = firstStatusGridUs(now);
 }
 
 void Diagnostics::armStatus(uint32_t count) {
+  const bool wasOff = statusRemaining_ == 0 && bleStatusRemaining_ == 0;
   statusRemaining_ = count;
-  if (count != 0) {
-    const uint64_t now = PlatformClock::nowUs();
-    frameRate_.reset(ble_.stats().sent, now);
-    for (size_t i = 0; i < obd_.channelCount; i++) channelRate_[i].reset(obd_.channels[i].replies, now);
-    nextStatusDueUs_ = firstStatusGridUs(now);
-  }
+  if (count != 0 && wasOff) startStatusGrid();
 }
 
 DeviceStatus Diagnostics::snapshot(uint64_t nowUs) const {
@@ -117,12 +179,12 @@ void Diagnostics::printReport() {
   console_.printReport(jobs, snapshot(PlatformClock::nowUs()));
 }
 
-void Diagnostics::printStatus(uint64_t nowUs) {
+size_t Diagnostics::formatStatusLine(uint64_t nowUs, char* buf, size_t cap) {
   StatusRates rates = {};
   rates.frameCentiHz = frameRate_.sampleCentiHz(ble_.stats().sent, nowUs);
   for (size_t i = 0; i < obd_.channelCount; i++)
     rates.channelCentiHz[i] = channelRate_[i].sampleCentiHz(obd_.channels[i].replies, nowUs);
-  console_.printStatus(snapshot(nowUs), rates);
+  return formatStatus(buf, cap, snapshot(nowUs), rates);
 }
 
 void Diagnostics::printVersion() {
@@ -150,31 +212,50 @@ size_t Diagnostics::formatVersion(char* buf, size_t cap) const {
 }
 
 void Diagnostics::printProtocol() {
-  char text[512];
+  static char text[1024];
   console_.print(text, formatProtocol(text, sizeof(text)));
 }
 
 size_t Diagnostics::formatProtocol(char* buf, size_t cap) const {
   // The fields Gnimu-CAN fills, in packet order (by offset).
   struct Channel {
-    const char* name;
+    char name[32];
     const char* type;
     unsigned offset;
     unsigned scale;
   };
-  const Channel channels[] = {
-      {"Device time (ms)", "int32", static_cast<unsigned>(frame::kDeviceTimeMsOffset), 1},
-      {"RPM", "int16", frame::info(frame::Field::EngineSpeed).offset, frame::info(frame::Field::EngineSpeed).scale},
-      {"Throttle (%)", "int16", frame::info(frame::Field::ThrottlePosition).offset,
-       frame::info(frame::Field::ThrottlePosition).scale},
-      {"Supply voltage (V)", "uint16", frame::info(frame::Field::SupplyVoltage).offset,
-       frame::info(frame::Field::SupplyVoltage).scale},
+  // Device time, then each polled channel and the supply, in packet order.
+  Channel channels[config::kObdPollCount + 2] = {};
+  size_t n = 0;
+  auto add = [&](const char* name, const char* unit, frame::Field f) {
+    Channel& c = channels[n++];
+    snprintf(c.name, sizeof(c.name), unit ? "%s (%s)" : "%s", name, unit);
+    c.type = typeName(frame::info(f).type);
+    c.offset = frame::info(f).offset;
+    c.scale = frame::info(f).scale;
   };
+  snprintf(channels[n].name, sizeof(channels[n].name), "Device time (ms)");
+  channels[n].type = "int32";
+  channels[n].offset = static_cast<unsigned>(frame::kDeviceTimeMsOffset);
+  channels[n++].scale = 1;
+  for (size_t i = 0; i < config::kObdPollCount; i++) {
+    if (config::kObdPolls[i].periodMs == 0) continue;
+    const obd2::PidDecoder* d = obd2::decoderFor(config::kObdPolls[i].field);
+    add(d->name, d->field == frame::Field::EngineSpeed ? nullptr : d->unit, d->field);
+  }
+  add("Supply voltage", "V", frame::Field::SupplyVoltage);
+  // By offset, as the packet lays them out.
+  for (size_t i = 1; i < n; i++)
+    for (size_t j = i; j > 0 && channels[j].offset < channels[j - 1].offset; j--) {
+      const Channel t = channels[j];
+      channels[j] = channels[j - 1];
+      channels[j - 1] = t;
+    }
   // Laid out like AutoXDL's custom sensor form: the device settings, then one
   // row per channel with the form's columns in its order.
   size_t wName = 4;  // "Name"
-  for (const Channel& c : channels)
-    if (detail::displayWidth(c.name) > wName) wName = detail::displayWidth(c.name);
+  for (size_t i = 0; i < n; i++)
+    if (detail::displayWidth(channels[i].name) > wName) wName = detail::displayWidth(channels[i].name);
   detail::Out o{buf, cap, 0};
   o.put("Gnimu CAN Protocol\n");
   o.put("  Service         %s\n", kGnimuServiceUuid);
@@ -183,7 +264,8 @@ size_t Diagnostics::formatProtocol(char* buf, size_t cap) const {
   o.put("  ");
   o.left("Name", wName + 2);
   o.put("Type    Offset  Scale\n");
-  for (const Channel& c : channels) {
+  for (size_t i = 0; i < n; i++) {
+    const Channel& c = channels[i];
     o.put("  ");
     o.left(c.name, wName + 2);
     o.left(c.type, 6);
@@ -196,8 +278,8 @@ size_t Diagnostics::formatProtocol(char* buf, size_t cap) const {
 
 size_t Diagnostics::formatSchema(char* buf, size_t cap) const {
   const FillMask fills[] = {
-      {"vehicle", fillMask(kVehicleFields, sizeof(kVehicleFields) / sizeof(kVehicleFields[0]))},
-      {"power", fillMask(kPowerFields, sizeof(kPowerFields) / sizeof(kPowerFields[0]))},
+      {"vehicle", vehicleFillMask()},
+      {"power", powerFillMask()},
   };
   return formatSchemaJson(buf, cap, frame::kSpecVersion, config::kBleNamePrefix, config::kEmitRateHz, fills,
                           sizeof(fills) / sizeof(fills[0]));
@@ -211,6 +293,14 @@ size_t Diagnostics::formatDeviceInfo(char* buf, size_t cap) const {
   snprintf(cutoff, sizeof(cutoff), "%lu.%02lu", c.whole, c.hundredths);
   const unsigned k = static_cast<unsigned>(config::kSupplyCalibration * 1000.0f + 0.5f);
   snprintf(cal, sizeof(cal), "%u.%03u", k / 1000, k % 1000);
+  // The PIDs polled, from Config.h's kObdPolls: "0C,11,...".
+  char pids[3 * config::kObdChannelCount + 1] = "";
+  size_t at = 0;
+  for (size_t i = 0; i < config::kObdPollCount; i++) {
+    if (config::kObdPolls[i].periodMs == 0) continue;
+    const obd2::PidDecoder* d = obd2::decoderFor(config::kObdPolls[i].field);
+    at += static_cast<size_t>(snprintf(pids + at, sizeof(pids) - at, "%s%02X", at ? "," : "", d->pid));
+  }
   const CfgItem cfg[] = {
       {"hw", board::kHardwareName, true},
       {"vehicle", "obd2", true},
@@ -220,9 +310,12 @@ size_t Diagnostics::formatDeviceInfo(char* buf, size_t cap) const {
       {"run_v", run, false},
       {"cutoff_v", cutoff, false},
       {"supply_cal", cal, false},
-      {"pids", "0C,11", true},
+      {"pids", pids, true},
   };
-  return formatDeviceInfoJson(buf, cap, buildInfo(), cfg, sizeof(cfg) / sizeof(cfg[0]));
+  // The commands the BLE Console accepts: the report-only ones, and a number
+  // for status lines.
+  return formatDeviceInfoJson(buf, cap, buildInfo(), cfg, sizeof(cfg) / sizeof(cfg[0]),
+                              "[\"D\",\"E\",\"V\",\"P\",\"n\"]");
 }
 
 }  // namespace gnimu

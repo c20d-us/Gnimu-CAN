@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include "../core/ConsoleEntry.h"
+#include "../core/EventLog.h"
 #include "../core/Report.h"
 #include "../core/StatusLine.h"
 #include "SystemConfig.h"
@@ -19,6 +20,8 @@ struct ConsoleCommand {
   CommandKind kind = CommandKind::None;
   bool hasCount = false;
   uint32_t count = 0;    // valid only when hasCount
+  bool hasArg = false;   // the command's own number: "E 20"
+  uint32_t arg = 0;
 };
 
 // Serial commands in, diagnostics report out. Nothing prints unless asked.
@@ -33,7 +36,6 @@ class Console {
   // bytes, so a paste can't hold up the loop; the rest waits for later calls.
   ConsoleCommand poll();
   void printReport(const JobTable& jobs, const DeviceStatus& status);
-  void printStatus(const DeviceStatus& status, const StatusRates& rates);
   // Text of several '\n'-separated lines, sent a line at a time like a report.
   void print(const char* text, size_t n) { emit(text, n); }
   // Boot-time and exception messages; one line each.
@@ -43,12 +45,24 @@ class Console {
   // Bytes thrown away because the host stopped reading; never cleared.
   uint32_t dropped() const { return dropped_; }
 
+  // The E command: the boot log and the recent events, or only the last
+  // `lastN` events.
+  void printEvents(size_t lastN);
+  // The same text into `buf`, lines ended by '\n', for a BLE reply.
+  // Truncated, never overrun; returns the length.
+  size_t formatEvents(char* buf, size_t cap, size_t lastN) const;
+
+  // Every log() line is kept here, so it can be read later.
+  using Events = EventLog<config::kBootLogBytes, config::kEventLogBytes>;
+  const Events& events() const { return events_; }
+
  private:
   void emit(const char* text, size_t n);
   void sendLine(const char* line, size_t len);
 
   ConsoleEntry<config::kStatusMaxCount> entry_;
   uint32_t dropped_ = 0;
+  Events events_;
 };
 
 }  // namespace gnimu

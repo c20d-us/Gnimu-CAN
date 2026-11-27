@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "../core/ConsoleReply.h"
 #include "../core/DeviceStatus.h"
 #include "../core/BusSearch.h"
 #include "../core/ObdDiscovery.h"
@@ -38,6 +39,8 @@ class App {
   void emitJob();
   void powerJob();
   void bleJob();
+  void bleCommand();
+  void bleText(const char* echo, const char* text);
   void ledJob();
   void consoleJob();
   // One line per job, each naming its id; the constructor checks the table at
@@ -89,6 +92,9 @@ class App {
   // Copies what polling knows into obdSummary_ for the reports and the frame.
   void refreshObdSummary(uint32_t nowMs);
   VehicleActivity activity() const;
+  // The engine-speed channel's value; true when it's fresh.
+  bool rpmFresh(float& rpm) const;
+  void logSupport();
   // A timer wake from deep sleep: a quick supply reading and a listen on the
   // bus, then either back to sleep (never returns) or on into a full boot.
   void wakeCheck(SleepRecord r);
@@ -114,9 +120,14 @@ class App {
   // Finding the ECU to poll: every reply to one request, then a choice
   // (core/ObdDiscovery.h).
   ObdDiscovery discovery_;
-  // Polled channels, in the order of kPollPids.
-  enum : size_t { kRpmChannel, kThrottleChannel, kPollChannels };
-  ObdPoller<kPollChannels> poller_;
+  // The OBD channels, in Config.h's kObdPolls order, then helper PIDs.
+  ObdPoller<config::kObdChannelCount> poller_;
+  bool supportLogged_ = false;  // this session's supported channels have been logged
+  bool askEveryone_ = false;    // the ECU answers only requests to 0x7DF: found this boot
+  // The BLE Console (Gnimu protocol, docs/frame.md, Console).
+  ConsoleReply<config::kBleReplyBytes> bleReply_;
+  ConsoleEntry<config::kStatusMaxCount> bleEntry_;
+  ConsoleGate bleGate_{config::kBleCommandGapMs};
   ObdSummary obdSummary_ = {};
   VehicleActivity loggedActivity_ = VehicleActivity::Unknown;
   // The request in progress, if any.

@@ -13,7 +13,7 @@ With the new board on the bench rig, before it goes anywhere near the car:
 - [ ] **Board check.** `scripts/tool.sh board_check --flash --monitor`: the LED blinks, BLE advertises, and A0 reads.
 - [ ] **Calibrate the supply reading.** Flash the firmware (`scripts/flash.sh --build --monitor`). Set the bench supply to about 12.6V and measure it **with a multimeter at the board's 12V input**, not the supply's display, which reads to only 0.1V. Read `Supply:` from the `D` report and set `kSupplyCalibration` in `Config.h` to *meter ÷ reported*, times the current value. Rebuild, flash, and check at 12.0V and 14.2V too: within about ±0.05V is good.
 - [ ] **Sleep wake check on the new board.** Let it sleep (fake ECU `OFF`, 12.6V, 5 minutes), then wake it at 14.2V and look at the `D` report's `Sleep: this boot woke for …` line: compare *slept at* with *checks read*. The breadboard showed a 0.05–0.15V gap; the PCB's ground layout may shrink it. Set `kWakeCheckOffsetV` in `Config.h` to the gap (*checks read* minus *slept at*, with the supply unchanged throughout).
-- [ ] **Fake ECU run.** Discovery, polling at about 25 Hz each, `OFF`/`ON`, and `GATEWAY`, as on the breadboard, plus `SECOND` (a transmission ECU that answers first). For the gateway test, set the fake ECU to `GATEWAY`: the device should probe within about 5 s of the bus going silent.
+- [ ] **Fake ECU run.** Discovery, polling at about 25 Hz each, `OFF`/`ON`, and `GATEWAY`, as on the breadboard, plus `SECOND` (a transmission ECU that answers first). With more channels turned on in `kObdPolls`, check the later bitmaps are read, then `SILENT xx` (the channel goes `NOT ANSWERING` and the rest keep their rates) and `REFUSE xx` (the channel is dropped). For the gateway test, set the fake ECU to `GATEWAY`: the device should probe within about 5 s of the bus going silent.
 - [ ] **Termination switch off.** The CAN Pal's termination switch must be **off** before the board goes in the car: the car's bus is already terminated. (It's on for the bench rig.)
 - [ ] **Flash the voltage logger last**, with the board on USB: `scripts/tool.sh voltage_log --flash --monitor`, then `CLEAR LOG` and `STATUS`.
 
@@ -146,6 +146,19 @@ The first in-car tests were on a Hyundai Santa Cruz rather than the M2: the firm
 - **The wake-check offset.** The first check read 12.90V against 12.68V at sleep, a 0.2V gap against the breadboard's 0.05–0.15V. The car's voltage was drifting after shutdown, so it isn't a clean measurement: the bench step above (*Sleep wake check on the new board*) still decides `kWakeCheckOffsetV`. The rise rule, which woke it here, measures from the lowest check reading, so the gap doesn't affect it.
 - **Driving:** poll rates and the supply's low phase while cruising.
 - **The M2**, which the sessions above were written for.
+
+## Results: BMW M2 (2026-11-26)
+
+The firmware session only, idling, with the console logged over USB.
+
+- **The OBD port carries traffic** with the engine running, about 250 frames a second at 500 kbit/s, so the device found the bus by listening, with no gateway probe.
+- **One ECU answers** the functional request: the engine on `0x7E8`, supporting RPM and throttle.
+- **Requests sent straight to the engine (`0x7E0`) go unanswered**: every one timed out, so the device cycled between finding the ECU and losing it 2 s later. The gateway acknowledges them (the transmit error counter stayed near 0) but passes on only functional requests (`0x7DF`). Polling now switches to asking everyone after 3 unanswered direct requests. With that, the M2 polls RPM and throttle at the full 25 Hz each, steady over about a minute with no vehicle lost, and a client receives frames at 20 Hz.
+- **Reply time:** with two channels, 13–15 ms average and 20–24 ms longest, measured in 10 ms `can` job steps, so the ECU and gateway together take about 10 ms. No timeouts after the switch in over 2,500 requests per channel.
+- **Ten channels at about 69 requests a second:** every channel the M2 supports polled at its target (RPM 25 Hz, throttle 19–20, pedal 9–10, speed 10, the temperatures 1 Hz, ambient and fuel every 5 s), with no timeouts in about 3,300 requests and replies averaging 10 ms. The M2 supports every channel in the table except charge air cooler temperature (`0x77`). With replies arriving within one job step, the 10 ms `can` step (at most about 100 requests a second) is now nearer the limit than the ECU.
+- **Values at idle:** coolant 81 °C, oil 66 °C, intake air 18 °C, ambient 12 °C, fuel 99.6 %, pedal 14.5 % with the foot off (the pedal PID reads a sensor, and doesn't start at 0 on every car).
+- **The receive queue overflowed briefly** (`missed 13` in about 70 s). The port's broadcast traffic, about 250 frames a second, filled the 32-frame queue in about 130 ms when the `can` job was held up that long. The queue is now 128 frames, about half a second of that traffic.
+- **Supply at OBD pin 16:** 15.0–15.1V idling shortly after a start.
 
 ---
 
