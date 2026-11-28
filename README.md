@@ -14,17 +14,17 @@
 
 Gnimu-CAN is firmware for a Seeed Studio XIAO ESP32C6 that reads vehicle data from a car's CAN bus and streams it over BLE (Bluetooth Low Energy) at a fixed rate, for telemetry apps to record alongside GNSS and IMU data. It's a companion to [Gnimu](https://github.com/c20d-us/Gnimu), and its first target app is [AutoX Data Logger](https://autoxdrivermod.com), which reads it as a custom BLE sensor.
 
-The first version is vehicle-agnostic: it polls standard OBD-II PIDs (RPM and throttle position to start) over the OBD-II port and works on most cars from 2008 on. Vehicle-specific variants will come later. It streams the shared [Gnimu frame](https://github.com/c20d-us/Gnimu-protocol); what it fills and how to set up AutoXDL are in [docs/ble-protocol.md](docs/ble-protocol.md).
+The first version is vehicle-agnostic: it polls standard Mode 01 OBD-II PIDs over the OBD-II port and should work on most cars from 2008 on. Vehicle-specific variants will come later. It streams the shared [Gnimu frame](https://github.com/c20d-us/Gnimu-protocol); what it fills and how to set up AutoXDL are in [docs/ble-protocol.md](docs/ble-protocol.md).
 
 > [!NOTE]
-> **Work in progress.** The firmware finds the car's CAN bit rate (or reaches a gatewayed port with a probe), discovers the engine ECU, polls RPM and throttle position, and streams them with the supply voltage in Gnimu frames over BLE. It sleeps when the car is parked or its battery is low, waking on a timer to check if it should resume operation. It has bench-tested against a fake ECU and with AutoXDL; the first car test is pending arrival of a custom PCB that will allow the hardware to be installed into a compact project box with a J1962 OBD-II plug ([docs/car-test.md](docs/car-test.md)). Nothing has been tagged or released, and anything here may change at any time.
+> **Work in progress.** The firmware finds the car's CAN bit rate (or reaches a gatewayed port with a probe), discovers the vehicle's ECUs, polls the defined Mode 01 PIDs, and streams the reported values with the supply voltage in Gnimu frames over BLE. It sleeps when the car is parked or its battery is low, waking on a timer to check if it should resume operation. It has had limited testing against actual vehicles. Nothing has been released, and anything here may change at any time.
 
 > [!WARNING]
-> **This device connects to your car's diagnostic port and transmits on its CAN bus.** It's a personal project, not a product: it hasn't been tested on any car other than the author's, and it comes with no warranty. If you build or use it, you do so entirely at your own risk. Read [Use at your own risk](#use-at-your-own-risk) first.
+> **This device connects to your car's diagnostic port and transmits on its CAN bus.** It's a personal project, not a product: it hasn't been tested on any cars other than the author's, and it comes with no warranty. If you build or use it, you do so entirely at your own risk. Read [Use at your own risk](#use-at-your-own-risk) first.
 
 ## Hardware
 
-The firmware targets the Gnimu-CAN carrier boards in [Gnimu-PCB](https://github.com/c20d-us/Gnimu-PCB/tree/main/boards/gnimu-can): a Seeed Studio XIAO ESP32C6 with an Adafruit CAN Pal transceiver, connected to the car through the OBD-II helper board. The first target is the 12V carrier.
+The firmware targets the Gnimu-CAN carrier boards in [Gnimu-PCB](https://github.com/c20d-us/Gnimu-PCB/tree/main/boards/gnimu-can): a Seeed Studio XIAO ESP32C6 with an [Adafruit CAN Pal transceiver](https://www.adafruit.com/product/5708), connected to the car through the OBD-II helper board.
 
 | XIAO pin | GPIO | Net |
 |---|---|---|
