@@ -60,7 +60,7 @@ static void testBoost() {
 static void testAlternates() {
   const obd2::PidDecoder* own = obd2::decoderFor(F::CoolantTemp);
   const obd2::PidDecoder* alt = obd2::altFor(F::CoolantTemp);
-  assert(own && alt && alt->pid == 0x67 && alt->length == 3 && obd2::bytesNeeded(*alt) == 2);
+  assert(own && alt && alt->pid == 0x67 && alt->length == 3 && alt->start + alt->bytes == 2);
   assert(alt->field == own->field && strcmp(alt->name, own->name) == 0 && strcmp(alt->unit, own->unit) == 0);
   const uint8_t reply[4] = {0x01, 0x7B, 0x00, 0};
   assert(near(obd2::decode(*alt, reply), 83.0f));
@@ -76,7 +76,7 @@ static void testTable() {
   for (size_t i = 0; i < obd2::kPidDecoderCount; i++) {
     const obd2::PidDecoder& d = obd2::kPidDecoders[i];
     assert(d.bytes == 1 || d.bytes == 2);
-    assert(obd2::bytesNeeded(d) <= 4);  // fits a single-frame reply's A..D
+    assert(d.start + d.bytes <= d.length && d.start + d.bytes <= 4);  // within the reply, and A..D
     assert(d.pid != 0x00 && d.pid != 0x20 && d.pid != 0x40 && d.pid != 0x60);  // not a bitmap
     for (size_t j = i + 1; j < obd2::kPidDecoderCount; j++) {
       assert(obd2::kPidDecoders[j].field != d.field);

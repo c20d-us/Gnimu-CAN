@@ -215,9 +215,29 @@ The fall back lasting a session, the RPM check, one reply path for every request
 - **While running, both sessions:** about 3,000 multi-PID requests with no failures, no late cycles and no timeouts; coolant from `0x67`, 45–48 °C. Replies of one frame about 10 ms and of several about 20 ms (longest 26 ms), as before.
 - **Waking:** after the switch-off, probes found an acknowledging but silent port at 113 s, no acknowledgement at 123 s (everything asleep), and an ECU answering at 133 s after the restart.
 
+## Results: M2, per-session fall back (2026-11-27)
+
+The same build and sequence as the Santa Cruz: plugged in parked, started, idled, switched off until `Waiting for vehicle`, started again.
+
+- **While running, both sessions:** about 4,100 multi-PID requests, 2.6 PIDs each, no failures, no late cycles, RPM and throttle at 50 Hz, through `0x7DF` with flow control at `0x7E0`. Coolant 45–54 °C and oil 33–40 °C warming; fuel 99.6 %, with no 0.0 % after the restart this time.
+- **No fall back at the switch-off:** `no replies for 2 s - waiting for the vehicle`, and no `multi-PID requests failed`. The engine-stopped check didn't come up here either.
+- **The restart was found late.** With the engine off, the M2's port keeps chattering, so the device stays at "traffic heard" and asks for an ECU on the discovery backoff: at 125, 130, 135 and 140 s, then not for 30 s. The engine restarted at about 163 s (`Supply: 14.77V, engine running`), but polling began only at the next try, at 170.5 s: 7 s late, and it could have been up to 30 s (or 2 minutes, after six tries). Fixed, at first, by asking at once when the supply reached the engine-running level; replaced by the faster backoff below.
+- **The supply stayed above 13.2 V for about 20 s after the switch-off** (13.37 V at `Waiting for vehicle`, `parked` only at 147 s), so the vehicle activity read "engine running" that long, and the parked timer started late by as much.
+- **Skipped `can` runs** were higher than on the Santa Cruz (about 11 a second against about 3), with the same 5–6 ms longest lateness; nothing missed and no late cycles.
+
+## Results: M2, discovery after a restart (2026-11-27)
+
+The engine-running discovery restart and the stale-request fix, the same sequence again.
+
+- **Running, both sessions:** about 3,400 multi-PID requests, no failures, no late cycles; after the switch-off, `no replies for 2 s` and no fall back.
+- **The supply came too late to help.** After the switch-off the port kept chattering and discovery backed off as before (tries at 101, 106, 111 and 116 s, then 30 s). The ECU answered the 30 s try at 146 s, with RPM fresh at once, but the supply reached the engine-running level only at 157.5 s, 11 s later: the M2's alternator doesn't charge straight after a start (intelligent alternator control). So the supply rule never fired, and the restart was found when the backoff allowed. In the earlier run the supply rose first, 7 s before the next try; on the M2 it isn't a dependable signal.
+- **The first discovery took about 35 s.** Plugging in woke the bus (traffic at 1.5 s), the four fast tries were spent by 16.7 s with the car still off, and the start fell in the 30 s wait; the supply rule found it at 36.9 s, about 10 s before the next try. Fixed: discovery asks every 5 s for the first 5 minutes of chatter, then once a minute; with that, the supply rule saved too little to keep, and is gone.
+- **The supply read 13.20V, "engine running"**, when it went back to waiting, again for about 15 s after the switch-off.
+
 ## Next run
 
-- **On the M2:** the same switch-off and restart, and its fuel reading just after a restart.
+- **M2, plug in and start, and switch off and restart:** discovery every 5 s (`asking again in 5 s` on every try for the first 5 minutes), and polling within about 5 s of the engine starting either way.
+- **M2, plugged in and locked, without starting:** when the bus falls silent (`CAN: no frames for 10 s - listening again`), to see whether the 5 s requests keep the car's network awake longer than it would otherwise stay.
 - **Either car:** watch for `multi-PID requests unanswered with the engine stopped` at a switch-off, the check that hasn't come up yet.
 
 ---

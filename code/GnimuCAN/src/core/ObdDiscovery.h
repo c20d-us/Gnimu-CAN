@@ -7,10 +7,28 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "DiscoveryBackoff.h"
 #include "Obd2.h"
 
 namespace gnimu {
+
+// How long to wait before asking for an ECU again, on a bus with traffic
+// where none has answered (docs/architecture.md, Bring-up). Two steps: often
+// at first, while someone getting into the car (the bus woken by the door or
+// the device plugged in) is likely to start it soon; then rarely, so a bus
+// that chatters without ever answering OBD (modules awake in a parked car,
+// or a car that answers only on 29-bit IDs) sees a request a minute, not one
+// every few seconds. The count starts over when the bus goes quiet or the
+// car is lost (restart()).
+struct DiscoveryBackoff {
+  uint32_t fastMs;     // between the first tries
+  uint32_t fastTries;  // ... this many of them
+  uint32_t slowMs;     // and from then on
+};
+
+// The wait after `failures` unanswered requests (1 or more).
+inline uint32_t discoveryRetryMs(const DiscoveryBackoff& b, uint32_t failures) {
+  return failures <= b.fastTries ? b.fastMs : b.slowMs;
+}
 
 struct ObdDiscoveryConfig {
   uint32_t collectMs;  // how long replies to one request are collected: P2, 50 ms
@@ -38,8 +56,8 @@ struct EcuChoice {
 // supporting it with the most PIDs supported in all.
 //
 // No reply, or no ECU supporting anything wanted: it asks again after the
-// backoff (DiscoveryBackoff), which starts over with restart(). Pure logic:
-// the App sends the request and hands over the replies.
+// backoff (DiscoveryBackoff above), which starts over with restart(). Pure
+// logic: the App sends the request and hands over the replies.
 class ObdDiscovery {
  public:
   static constexpr size_t kMaxEcus = 8;  // 0x7E8-0x7EF

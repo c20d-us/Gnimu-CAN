@@ -107,15 +107,15 @@ constexpr uint32_t kSilentRetryMs = 5000;
 constexpr uint8_t kAskEveryoneAfterTimeouts = 3;
 // Multi-PID requests that fail this many times in a row (no reply in time, a
 // reply that doesn't parse, "not supported"): one PID per request for the
-// rest of the boot.
+// rest of the session.
 constexpr uint8_t kBundleFallBackAfter = 3;
 // With traffic on the bus but no ECU answering, how long before asking again:
-// every 5 s for 3 tries, every 30 s for the next 3, then every 2 minutes
-// (core/DiscoveryBackoff.h). Starts over when the bus goes quiet.
+// every 5 s for the first 5 minutes, then once a minute
+// (core/ObdDiscovery.h). Starts over when the bus goes quiet or the car is
+// lost.
 constexpr uint32_t kDiscoveryRetryMs = 5000;
-constexpr uint32_t kDiscoveryBackoffMs = 30000;
-constexpr uint32_t kDiscoveryMaxBackoffMs = 120000;
-constexpr uint8_t kDiscoveryTriesPerStep = 3;
+constexpr uint32_t kDiscoveryFastForMs = 300000;
+constexpr uint32_t kDiscoverySlowRetryMs = 60000;
 
 // The console's event log (the E command, over USB or BLE): the first
 // kBootLogBytes of lines after each boot, kept whole, then a rolling
@@ -213,9 +213,9 @@ static_assert(kStalePeriods >= 2, "a value must stay fresh for at least two poll
 static_assert(kSilentAfterTimeouts >= 1 && kSilentRetryMs >= 1000, "silent channels: at least 1 timeout, retry >= 1 s");
 static_assert(kAskEveryoneAfterTimeouts >= 1 && kAskEveryoneAfterTimeouts * kObdReplyTimeoutMs * 2 < kVehicleLostMs,
               "asking everyone must start well before the vehicle counts as lost");
-static_assert(kDiscoveryRetryMs <= kDiscoveryBackoffMs && kDiscoveryBackoffMs <= kDiscoveryMaxBackoffMs,
-              "discovery backoff must not get shorter");
-static_assert(kDiscoveryTriesPerStep >= 1, "at least one discovery try per backoff step");
+static_assert(kDiscoveryRetryMs >= 1000 && kDiscoveryRetryMs <= kDiscoverySlowRetryMs,
+              "discovery retries must be at least 1 s apart, and the slow ones no closer than the fast");
+static_assert(kDiscoveryFastForMs >= kDiscoveryRetryMs, "the fast discovery retries must cover at least one try");
 static_assert(kVehicleLostMs > kObdReplyTimeoutMs * 4, "vehicle-lost window too short to be meaningful");
 static_assert(kSleepAfterParkedS >= 60, "sleeping less than a minute after parking would sleep at traffic lights");
 static_assert(kParkedCheckIntervalS >= 5 && kParkedCheckIntervalS <= 300,

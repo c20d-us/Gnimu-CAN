@@ -572,6 +572,24 @@ static void testBusyConfirmsTheEcu() {
   assert(p.takeFellBack());
 }
 
+// The car lost with a multi-PID request in flight (one goes every cycle):
+// the next session's first reply, a support bitmap, is taken as such, not
+// judged against the old request.
+static void testNewSessionWithARequestInFlight() {
+  ObdPoller<5> p(kFive, kBundled);
+  uint32_t now = 1000;
+  startBundled(p, now);
+  CanFrame req;
+  assert(p.next(now, req) && req.data[0] > 2);  // in flight, never answered
+  now += 3000;
+  startBundled(p, now);
+  assert(p.bundleStats().failures == 0);
+  assert(p.next(now, req) && req.data[0] > 2);  // multi-PID straight away
+  CanFrame f[4];
+  deliver(p, f, answer(req, f), now + 5);
+  assert(p.bundleStats().replies == 1 && p.bundleStats().failures == 0);
+}
+
 static void testOnePidOnly() {
   // kObdMaxPidsPerRequest = 1.
   const PollerConfig one = {50, 9, 3, 5000, 3, 20, 1, 3};
@@ -608,6 +626,7 @@ int main() {
   testCarGoingQuietKeepsMultiPid();
   testEngineStoppedKeepsMultiPid();
   testBusyConfirmsTheEcu();
+  testNewSessionWithARequestInFlight();
   testOnePidOnly();
   printf("test_obdbundle: ok\n");
   return 0;

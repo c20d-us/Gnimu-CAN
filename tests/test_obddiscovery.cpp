@@ -4,7 +4,8 @@
 
 // OBD discovery: every reply to one request is collected for P2, then the ECU
 // to poll is chosen (0x7E8 first, then the most capable ECU supporting a
-// wanted PID), and a round with nothing chosen backs off.
+// wanted PID), and a round with nothing chosen backs off: every 5 s at
+// first, then once a minute.
 
 #include <assert.h>
 #include <stdio.h>
@@ -14,7 +15,9 @@
 
 using namespace gnimu;
 
-static const ObdDiscoveryConfig kConfig = {50, {5000, 30000, 120000, 3}};
+// Every 5 s for 3 tries, then every 60 s (shortened from the firmware's 60
+// fast tries).
+static const ObdDiscoveryConfig kConfig = {50, {5000, 3, 60000}};
 static const uint8_t kWanted[] = {0x0C, 0x11};  // RPM, then throttle
 
 // PID 0x00 support bitmaps (top bit PID 0x01).
@@ -97,7 +100,7 @@ static void testNoReplyBacksOffLikeBefore() {
   ObdDiscovery d(kConfig);
   d.restart(1000);
   uint32_t t = 1000;
-  const uint32_t waits[] = {5000, 5000, 5000, 30000, 30000, 30000, 120000, 120000};
+  const uint32_t waits[] = {5000, 5000, 5000, 60000, 60000, 60000, 60000, 60000};
   for (uint32_t w : waits) {
     const EcuChoice c = discoveryRound(d, t, [](ObdDiscovery&) {});
     assert(!c.chosen && c.answered == 0 && d.retryInMs() == w);
@@ -127,7 +130,21 @@ static void testResponseIdText() {
   assert(buf[0] == '\0');
 }
 
+// Discovery on a bus nobody answers: every 5 s for 5 minutes, then once a
+// minute.
+static void testDiscoveryBackoff() {
+  const DiscoveryBackoff b = {5000, 60, 60000};
+  assert(discoveryRetryMs(b, 1) == 5000 && discoveryRetryMs(b, 60) == 5000);
+  assert(discoveryRetryMs(b, 61) == 60000 && discoveryRetryMs(b, 1000000) == 60000);
+  // An hour of a bus that never answers: 60 in the first 5 minutes, then 55
+  // more, not 720.
+  uint32_t t = 0, n = 0;
+  while (t < 3600000) t += discoveryRetryMs(b, ++n);
+  assert(n == 115);
+}
+
 int main() {
+  testDiscoveryBackoff();
   testTransmissionFirstStillPicksTheEngine();
   testOnlyAnotherEcuHasRpm();
   testMostCapableWinsAmongRpmEcus();

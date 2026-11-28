@@ -108,8 +108,8 @@ App::App()
       probe_({config::kGatewayProbeMinV, config::kProbeHoldMs, config::kProbeIntervalMs}),
       search_({config::kCanRateWindowMs, config::kBusSilentMs}),
       discovery_({config::kObdReplyTimeoutMs,
-                  {config::kDiscoveryRetryMs, config::kDiscoveryBackoffMs, config::kDiscoveryMaxBackoffMs,
-                   config::kDiscoveryTriesPerStep}}),
+                  {config::kDiscoveryRetryMs, config::kDiscoveryFastForMs / config::kDiscoveryRetryMs,
+                   config::kDiscoverySlowRetryMs}}),
       // The request cap as a minimum gap, 1 ms under so the can job's tick
       // jitter can't make a request wait a whole extra tick.
       poller_(pollTable().channels, {config::kObdReplyTimeoutMs, 1000 / config::kMaxObdRequestsPerSec - 1,

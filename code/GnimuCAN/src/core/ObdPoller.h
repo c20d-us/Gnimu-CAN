@@ -36,7 +36,7 @@ struct PollerConfig {
   uint8_t fallBackAfter;    // multi-PID failures in a row before one PID per request
 };
 
-// Why multi-PID polling stopped for the boot.
+// Why multi-PID polling stopped for the session.
 enum class BundleFault : uint8_t {
   None,
   Timeout,       // no complete reply in time
@@ -64,7 +64,7 @@ inline const char* bundleFaultText(BundleFault f) {
 // How multi-PID polling is going this session.
 struct BundleStats {
   bool active;          // asking for several PIDs per request now
-  bool fellBack;        // stopped for the boot: one PID per request
+  bool fellBack;        // stopped for the session: one PID per request
   BundleFault fault;    // ... because of three of these in a row
   uint8_t busiest;      // the most PIDs one cycle's request carries
   uint32_t requests;
@@ -94,8 +94,7 @@ struct PollChannel {
   uint8_t timeoutsInRow;
   bool valid;  // at least one reply since polling started
   uint32_t lastReplyMs;
-  uint8_t len;
-  uint8_t data[4];  // the latest reply's A..D
+  uint8_t data[4];  // the latest reply's A..D (zero past the PID's length)
   uint32_t replyMsTotal;  // request to reply, summed over the replies; in the
   uint32_t replyMsMax;    // ... caller's tick steps, so a resolution of its period
   uint32_t every;         // multi-PID polling: in every this-many cycles' request ...
@@ -177,6 +176,7 @@ class ObdPoller {
     answered_ = false;
     timeoutsInRow_ = 0;
     inFlight_ = false;
+    bundleCount_ = 0;  // a multi-PID request in flight when the last session ended
     lastAnyReplyMs_ = nowMs;
     lastSentMs_ = nowMs - c_.minGapMs;
     for (size_t i = 0; i < N; i++) {
@@ -187,7 +187,6 @@ class ObdPoller {
       c.requests = c.replies = c.timeouts = 0;
       c.timeoutsInRow = 0;
       c.valid = false;
-      c.len = 0;
       memset(c.data, 0, sizeof(c.data));
       c.replyMsTotal = c.replyMsMax = 0;
       c.every = c.offset = 0;
@@ -354,7 +353,6 @@ class ObdPoller {
   uint32_t silentForMs(uint32_t nowMs) const { return nowMs - lastAnyReplyMs_; }
 
   const PollChannel& channel(size_t i) const { return ch_[i]; }
-  size_t channelCount() const { return N; }
   uint32_t requestId() const { return requestId_; }
   // Where requests go: the ECU's physical address, or 0x7DF.
   uint32_t sendId() const { return askEveryone_ ? obd2::kFunctionalRequestId : requestId_; }
@@ -419,6 +417,7 @@ class ObdPoller {
     out = obd2::mode01Request(pid, sendId());
     rx_.reset();
     flowControl_ = false;
+    bundleCount_ = 0;  // one PID: its reply is split against that alone
     inFlight_ = true;
     inFlightIndex_ = index;
     inFlightPid_ = pid;
@@ -641,9 +640,8 @@ class ObdPoller {
     c.state = ChannelState::Polling;
     c.valid = true;
     c.lastReplyMs = nowMs;
-    c.len = len < sizeof(c.data) ? len : sizeof(c.data);
     memset(c.data, 0, sizeof(c.data));
-    memcpy(c.data, data, c.len);
+    memcpy(c.data, data, len < sizeof(c.data) ? len : sizeof(c.data));
   }
 
   bool negative(uint8_t nrc, uint32_t nowMs) {

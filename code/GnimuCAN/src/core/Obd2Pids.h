@@ -116,10 +116,7 @@ constexpr bool hasDecoder(frame::Field field, size_t i = 0) {
   return i < kPidDecoderCount && (kPidDecoders[i].field == field || hasDecoder(field, i + 1));
 }
 
-// Data bytes a reply needs to decode.
-inline uint8_t bytesNeeded(const PidDecoder& d) { return static_cast<uint8_t>(d.start + d.bytes); }
-
-// The value from a reply's data bytes A..D (at least bytesNeeded()).
+// The value from a reply's data bytes A..D (at least start + bytes of them).
 inline float decode(const PidDecoder& d, const uint8_t* data) {
   const uint32_t raw = d.bytes == 2 ? (static_cast<uint32_t>(data[d.start]) << 8) | data[d.start + 1] : data[d.start];
   return static_cast<float>(raw) * d.scale + d.offset;
